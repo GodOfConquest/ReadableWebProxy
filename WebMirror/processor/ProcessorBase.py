@@ -95,10 +95,16 @@ class PageProcessor(LogBase.LoggerMixin, metaclass=abc.ABCMeta):
 	def wantsUrl(url):
 		return True
 
+	@staticmethod
+	def wantsFromContent(content):
+		return True
+
 	_relinkDomains  = []
 	_scannedDomains = []
 	_badwords       = []
 
+
+	_no_ret = False
 
 	# Hook so plugins can modify the internal URLs as part of the relinking process
 	def preprocessReaderUrl(self, inUrl):
@@ -113,6 +119,11 @@ class PageProcessor(LogBase.LoggerMixin, metaclass=abc.ABCMeta):
 		# Do not relink inline images
 		if inUrl.startswith("data:"):
 			return inUrl
+
+		# or links that are NOP()ed with javascript
+		if inUrl.startswith("javascript:void(0);"):
+			return inUrl
+
 
 		# Fix protocol-relative URLs
 		if inUrl.startswith("//"):
@@ -381,6 +392,7 @@ class PageProcessor(LogBase.LoggerMixin, metaclass=abc.ABCMeta):
 			'relinkable',
 			'destyle',
 			'preserveAttrs',
+			'type',
 		]
 
 		assert len(params) == len(expected)
@@ -390,16 +402,33 @@ class PageProcessor(LogBase.LoggerMixin, metaclass=abc.ABCMeta):
 		instance = cls(**params)
 		ret = instance.extractContent()
 
+		# Filters don't return anything, so
+		# don't check for return stuff
+		if cls._no_ret:
+			return
+
 		# Copy the mime-type into the return, since bothering to round-trip
 		# it through the processor class is silly.
 		ret['mimeType'] = params['mimeType']
 
+		# Google doc returns include inline content (images, usualy)
 		gdoc_ret_expected = ['plainLinks', 'rsrcLinks', 'title', 'contents', 'mimeType', 'resources']
+
+		# Normal return have just markup, title, contents, and the mime-type
 		text_ret_expected = ['plainLinks', 'rsrcLinks', 'title', 'contents', 'mimeType']
+
+		# File content doesn't contain links or a title, but does include the file-name (generally from the URL or the content-disposition headers)
 		file_ret_expected = ['file', 'content', 'fName', 'mimeType']
+
+		# Rss content is a set of responses (one per article), so we just have two high-level entries.
+		rss_ret_expected  = ['mimeType', 'rss-content']
+
 		if "file" in ret and ret['file'] == True:
 			assert len(ret) == len(file_ret_expected), "File response length mismatch! Expect: %s, received %s (expect keys: '%s', received keys '%s')" % (len(file_ret_expected), len(ret), file_ret_expected, list(ret.keys()))
 			for expect in file_ret_expected:
+				assert expect in ret, "Expected key '%s' in ret (keys: '%s')" % (expect, list(ret.keys()))
+		elif 'rss-content' in ret:
+			for expect in rss_ret_expected:
 				assert expect in ret, "Expected key '%s' in ret (keys: '%s')" % (expect, list(ret.keys()))
 		else:
 

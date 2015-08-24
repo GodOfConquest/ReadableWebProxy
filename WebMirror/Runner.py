@@ -3,7 +3,6 @@ if __name__ == "__main__":
 	import logSetup
 	logSetup.initLogging()
 
-from concurrent.futures import ProcessPoolExecutor
 import WebMirror.rules
 import WebMirror.util.urlFuncs as urlFuncs
 import time
@@ -12,26 +11,27 @@ import signal
 import logging
 import traceback
 import WebMirror.Engine
-
-# Global run control value. Only used to stop running processes.
-run_state   = multiprocessing.Value('i', 1)
+import runStatus
+import WebMirror.database as db
 
 # For synchronizing saving cookies to disk
 cookie_lock = multiprocessing.Lock()
 
 def halt_exc(x, y):
-	if run_state.value == 0:
+	if runStatus.run_state.value == 0:
 		print("Raising Keyboard Interrupt")
 		raise KeyboardInterrupt
 
 class RunInstance(object):
 	def __init__(self, num, rules, nosig=True):
+		print("RunInstance %s init!" % num)
 		if nosig:
 			signal.signal(signal.SIGINT, signal.SIG_IGN)
 		self.num = num
 		self.log = logging.getLogger("Main.Text.Web")
 
 		self.archiver = WebMirror.Engine.SiteArchiver(cookie_lock)
+		print("RunInstance %s MOAR init!" % num)
 
 
 	def do_task(self):
@@ -39,20 +39,28 @@ class RunInstance(object):
 
 	def go(self):
 		self.log.info("RunInstance starting!")
+		loop = 0
 		while 1:
 
-			if run_state.value:
+			if runStatus.run_state.value == 1:
 				self.do_task()
 				time.sleep(1)
 			else:
 				self.log.info("Thread %s exiting.", self.num)
 				break
+			loop += 1
+
+			if loop == 15:
+				loop = 0
+				self.log.info("Thread %s awake. Runstate: %s", self.num, runStatus.run_state.value)
 
 
 	@classmethod
 	def run(cls, num, rules, nosig=True):
+		print("Running!")
 		try:
 			run = cls(num, rules, nosig)
+			print("Class instantiated: ", run)
 			run.go()
 		except Exception:
 			print()
@@ -61,13 +69,10 @@ class RunInstance(object):
 
 def initializeStartUrls(rules):
 	print("Initializing all start URLs in the database")
-	import WebMirror.database as db
-	print(db)
-	print(db.session)
 
 	for ruleset in [rset for rset in rules if rset['starturls']]:
 		for starturl in ruleset['starturls']:
-			have = db.session.query(db.WebPages)     \
+			have = db.get_session().query(db.WebPages)     \
 				.filter(db.WebPages.url == starturl) \
 				.count()
 			if not have:
@@ -81,8 +86,8 @@ def initializeStartUrls(rules):
 						distance = db.DB_DEFAULT_DIST,
 					)
 				print("Missing start-url for address: '{}'".format(starturl))
-				db.session.add(new)
-	db.session.commit()
+				db.get_session().add(new)
+		db.get_session().commit()
 
 
 
@@ -93,23 +98,21 @@ class Crawler(object):
 
 	def run(self):
 
-		PROCESSES = 1
+		PROCESSES = 8
 		tasks =[]
-		# executor = ProcessPoolExecutor(max_workers=PROCESSES)
-		# tasks = [multiprocessing.Process(target=RunInstance.run, args=(x, self.rules)) for x in range(PROCESSES)]
-		# [task.start() for task in tasks]
 		cnt = 0
 		procno = 0
 
 		if PROCESSES > 1:
 			try:
-				while run_state.value:
+				while runStatus.run_state.value:
 					time.sleep(1)
 					cnt += 1
 					if cnt == 10:
 						cnt = 0
 						living = sum([task.is_alive() for task in tasks])
 						for x in range(PROCESSES - living):
+							self.log.warning("Insufficent living child threads! Creating another thread with number %s", procno)
 							proc = multiprocessing.Process(target=RunInstance.run, args=(procno, self.rules))
 							tasks.append(proc)
 							proc.start()
@@ -117,15 +120,15 @@ class Crawler(object):
 						self.log.info("Living processes: %s", living)
 
 			except KeyboardInterrupt:
-				run_state.value = 0
+				runStatus.run_state.value = 0
 				pass
 
 			self.log.info("Crawler allowing ctrl+c to propagate.")
 			time.sleep(1)
-			run_state.value = 0
+			runStatus.run_state.value = 0
 
 
-			self.log.info("Crawler waiting on executor to complete.")
+			self.log.info("Crawler waiting on executor to complete: Runstate = %s", runStatus.run_state.value)
 			while 1:
 				living = sum([task.is_alive() for task in tasks])
 				[task.join(3.0/(living+1)) for task in tasks]

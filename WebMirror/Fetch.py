@@ -9,21 +9,15 @@ import WebMirror.LogBase as LogBase
 
 import datetime
 
-
-import WebMirror.processor.HtmlProcessor
-import WebMirror.processor.GDriveDirProcessor
-import WebMirror.processor.GDocProcessor
-import WebMirror.processor.MarkdownProcessor
-import WebMirror.processor.BinaryProcessor
-
 import WebMirror.util.urlFuncs as url_util
 import urllib.parse
-import traceback
 import WebMirror.util.webFunctions as webFunctions
 import bs4
 
 import WebMirror.processor.ProcessorBase
 
+from activePlugins import PLUGINS
+from activePlugins import FILTERS
 
 class DownloadException(Exception):
 	pass
@@ -40,15 +34,6 @@ class DownloadException(Exception):
 #
 ########################################################################################################################
 
-
-PLUGINS = [
-	WebMirror.processor.HtmlProcessor.HtmlPageProcessor,
-	WebMirror.processor.GDriveDirProcessor.GDriveDirProcessor,
-	WebMirror.processor.GDocProcessor.GdocPageProcessor,
-	WebMirror.processor.MarkdownProcessor.MarkdownProcessor,
-	WebMirror.processor.BinaryProcessor.BinaryResourceProcessor,
-]
-
 class ItemFetcher(LogBase.LoggerMixin):
 
 
@@ -61,14 +46,16 @@ class ItemFetcher(LogBase.LoggerMixin):
 	# The db defaults to  (e.g. max signed integer value) anyways
 	FETCH_DISTANCE = 1000 * 1000
 
-	def __init__(self, rules, target_url, start_url, cookie_lock, wg_handle=None):
+	def __init__(self, rules, target_url, start_url, cookie_lock=None, wg_handle=None):
 		# print("Fetcher init()")
 		super().__init__()
 
 		if wg_handle:
 			self.wg = wg_handle
-		else:
+		elif cookie_lock:
 			self.wg = webFunctions.WebGetRobust(cookie_lock=cookie_lock)
+		else:
+			self.wg = webFunctions.WebGetRobust()
 
 		# Validate the plugins implement the proper interface
 		for item in PLUGINS:
@@ -82,6 +69,11 @@ class ItemFetcher(LogBase.LoggerMixin):
 				self.plugin_modules[key].append(item)
 			else:
 				self.plugin_modules[key] = [item]
+
+
+		self.filter_modules = []
+		for item in FILTERS:
+			self.filter_modules.append(item)
 
 		baseRules = [ruleset for ruleset in rules if ruleset['netlocs'] == None].pop(0)
 
@@ -144,7 +136,7 @@ class ItemFetcher(LogBase.LoggerMixin):
 
 
 
-	def plugin_dispatch(self, plugin, url, content, fName, mimeType):
+	def plugin_dispatch(self, plugin, url, content, fName, mimeType, no_ret=False):
 		self.log.info("Dispatching file '%s' with mime-type '%s'", fName, mimeType)
 
 
@@ -165,9 +157,13 @@ class ItemFetcher(LogBase.LoggerMixin):
 									'relinkable'      : self.relinkable,
 									'destyle'         : self.rules['destyle'],
 									'preserveAttrs'   : self.rules['preserveAttrs'],
+									'type'            : self.rules['type'],
 		}
 
 		ret = plugin.process(params)
+
+		if no_ret:
+			return
 
 		assert "mimeType" in ret or "file" in ret, "Neither mimetype or file in ret for url '%s', plugin '%s'" % (url, plugin)
 
@@ -219,13 +215,24 @@ class ItemFetcher(LogBase.LoggerMixin):
 
 	def dispatchContent(self, content, fName, mimeType):
 
+		# Feed content through filters that want it (if any):
+		for filter_plg in self.filter_modules:
+			if mimeType.lower() in filter_plg.wanted_mimetypes and \
+					filter_plg.wantsUrl(self.target_url)       and \
+					filter_plg.wantsFromContent(content):
+				self.plugin_dispatch(filter_plg, self.target_url, content, fName, mimeType, no_ret=True)
+
+
+		# Then actually process it.
 		keys = list(self.plugin_modules.keys())
 		keys.sort(reverse=True)
 
 		for key in keys:
 			for plugin in self.plugin_modules[key]:
-				if mimeType.lower() in plugin.wanted_mimetypes and plugin.wantsUrl(self.target_url):
-					# print("plugin", plugin, "wants", self.target_url)
+				if mimeType.lower() in plugin.wanted_mimetypes and \
+						plugin.wantsUrl(self.target_url)       and \
+						plugin.wantsFromContent(content):
+					print("plugin", plugin, "wants", self.target_url)
 					ret = self.plugin_dispatch(plugin, self.target_url, content, fName, mimeType)
 					if not "file" in ret:
 						ret['rawcontent'] = content

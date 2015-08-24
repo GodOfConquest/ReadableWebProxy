@@ -1,5 +1,6 @@
 
-# import rpc
+import os
+import multiprocessing
 
 DB_REALTIME_PRIORITY =    1 * 1000
 DB_HIGH_PRIORITY     =   10 * 1000
@@ -38,6 +39,7 @@ from sqlalchemy.dialects.postgresql.base import ischema_names
 import citext
 import datetime
 from sqlalchemy.dialects.postgresql import ENUM
+from sqlalchemy.dialects.postgresql import JSON
 ischema_names['citext'] = citext.CIText
 
 from settings import DATABASE_IP            as C_DATABASE_IP
@@ -48,14 +50,36 @@ from settings import DATABASE_PASS          as C_DATABASE_PASS
 SQLALCHEMY_DATABASE_URI = 'postgresql://{user}:{passwd}@{host}:5432/{database}'.format(user=C_DATABASE_USER, passwd=C_DATABASE_PASS, host=C_DATABASE_IP, database=C_DATABASE_DB_NAME)
 
 
-engine = create_engine(SQLALCHEMY_DATABASE_URI,
-			isolation_level="REPEATABLE READ")
+SESSIONS = {}
+ENGINES = {}
 
-session = scoped_session(sessionmaker(bind=engine, autoflush=False, autocommit=False))()
-print("Creating database interface:", session)
+def get_engine():
+	cpid = multiprocessing.current_process().name
+	if not cpid in SESSIONS:
+		ENGINES[cpid] = create_engine(SQLALCHEMY_DATABASE_URI,
+					isolation_level="REPEATABLE READ")
+
+	return ENGINES[cpid]
+
+def get_session():
+	cpid = multiprocessing.current_process().name
+	if not cpid in SESSIONS:
+		engine = create_engine(SQLALCHEMY_DATABASE_URI,
+					isolation_level="REPEATABLE READ")
+
+		SESSIONS[cpid] = scoped_session(sessionmaker(bind=get_engine(), autoflush=False, autocommit=False))()
+		print("Creating database interface:", SESSIONS[cpid])
+
+	return SESSIONS[cpid]
+
+
+# import traceback
+# traceback.print_stack()
+
+
 Base = declarative_base()
 
-dlstate_enum  = ENUM('new', 'fetching', 'processing', 'complete', 'error', 'removed', name='dlstate_enum')
+dlstate_enum   = ENUM('new', 'fetching', 'processing', 'complete', 'error', 'removed', name='dlstate_enum')
 itemtype_enum  = ENUM('western', 'eastern', 'unknown',            name='itemtype_enum')
 
 class WebPages(Base):
@@ -102,9 +126,95 @@ class WebFiles(Base):
 	fspath       = Column(Text, nullable=False)
 
 
+##########################################################################################
+##########################################################################################
+##########################################################################################
+##########################################################################################
 
 
-Base.metadata.create_all(bind=engine, checkfirst=True)
+feed_tags_link = Table(
+		'feed_tags_link', Base.metadata,
+		Column('releases_id', Integer, ForeignKey('feed_pages.id'), nullable=False),
+		Column('tags_id',     Integer, ForeignKey('feed_tags.id'),     nullable=False),
+		PrimaryKeyConstraint('releases_id', 'tags_id')
+	)
+
+feed_author_link = Table(
+		'feed_authors_link', Base.metadata,
+		Column('releases_id', Integer, ForeignKey('feed_pages.id'), nullable=False),
+		Column('author_id',   Integer, ForeignKey('feed_author.id'),     nullable=False),
+		PrimaryKeyConstraint('releases_id', 'author_id')
+	)
+
+
+class Tags(Base):
+	__tablename__ = 'feed_tags'
+	id          = Column(Integer, primary_key=True)
+	tag         = Column(citext.CIText(), nullable=False, index=True)
+
+	__table_args__ = (
+		UniqueConstraint('tag'),
+		)
+
+
+class Author(Base):
+	__tablename__ = 'feed_author'
+	id          = Column(Integer, primary_key=True)
+	author      = Column(citext.CIText(), nullable=False, index=True)
+
+	__table_args__ = (
+		UniqueConstraint('author'),
+		)
+
+
+def tag_creator(tag):
+
+	tmp = get_session().query(Tags)         \
+		.filter(Tags.tag == tag) \
+		.scalar()
+	if tmp:
+		return tmp
+
+	return Tags(tag=tag)
+
+def author_creator(author):
+	tmp = get_session().query(Author)                  \
+		.filter(Author.author == author) \
+		.scalar()
+	if tmp:
+		return tmp
+	return Author(author=author)
+
+
+class FeedItems(Base):
+	__tablename__ = 'feed_pages'
+
+	id          = Column(Integer, primary_key=True)
+
+	type        = Column(itemtype_enum, default='unknown', index=True)
+
+	srcname      = Column(Text, nullable=False, index=True)
+	feedurl      = Column(Text, nullable=False, index=True)
+	contenturl   = Column(Text, nullable=False, index=True)
+	contentid    = Column(Text, nullable=False, index=True, unique=True)
+
+	title        = Column(Text)
+	contents     = Column(Text)
+	author       = Column(Text)
+
+
+	updated      = Column(DateTime, default=datetime.datetime.min)
+	published    = Column(DateTime, nullable=False)
+
+	tag_rel       = relationship('Tags',       secondary=feed_tags_link,   backref='feed_pages')
+	author_rel    = relationship('Author',     secondary=feed_author_link, backref='feed_pages')
+
+
+	tags          = association_proxy('tag_rel',      'tag',       creator=tag_creator)
+	author        = association_proxy('author_rel',   'author',    creator=author_creator)
+
+
+Base.metadata.create_all(bind=get_engine(), checkfirst=True)
 
 
 

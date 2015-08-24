@@ -5,10 +5,16 @@ import urllib.parse
 import re
 import json
 import logging
-from FeedScrape.feedNameLut import getNiceName
+import WebMirror.OutputFilters.util.feedNameLut as feedNameLut
+from WebMirror.OutputFilters import AmqpInterface
 import settings
-import FeedScrape.AmqpInterface
-from titleParse import TitleParser
+from WebMirror.util.titleParse import TitleParser
+
+
+from WebMirror.OutputFilters.util.MessageConstructors import buildReleaseMessage
+from WebMirror.OutputFilters.util.TitleParsers import extractChapterVol
+from WebMirror.OutputFilters.util.TitleParsers import extractVolChapterFragmentPostfix
+from WebMirror.OutputFilters.util.TitleParsers import extractChapterVolFragment
 
 # pylint: disable=W0201
 
@@ -18,67 +24,6 @@ skip_filter = [
 	"re-monster.wikia.com",
 ]
 
-def extractTitle(inStr):
-	# print("Parsing: '%s'" % inStr)
-	p    = TitleParser(inStr)
-	vol  = p.getVolume()
-	chp  = p.getChapter()
-	frag = p.getFragment()
-	post = p.getPostfix()
-	return vol, chp, frag, post
-
-def extractChapterVol(inStr):
-	vol, chp, dummy_frag, dummy_post = extractTitle(inStr)
-	return chp, vol
-
-def extractVolChapterFragmentPostfix(inStr):
-	vol, chp, frag, post = extractTitle(inStr)
-	return vol, chp, frag, post
-
-def extractChapterVolFragment(inStr):
-	vol, chp, frag, dummy_post = extractTitle(inStr)
-	return chp, vol, frag
-
-
-
-def buildReleaseMessage(raw_item, series, vol, chap=None, frag=None, postfix='', author=None, tl_type='translated', extraData={}):
-	'''
-	Special case behaviour:
-		If vol or chapter is None, the
-		item in question will sort to the end of
-		the relevant sort segment.
-	'''
-	ret = {
-		'srcname'   : raw_item['srcname'],
-		'series'    : series,
-		'vol'       : vol,
-		'chp'       : packChapterFragments(chap, frag),
-		'published' : raw_item['published'],
-		'itemurl'   : raw_item['linkUrl'],
-		'postfix'   : postfix,
-		'author'    : author,
-		'tl_type'   : tl_type,
-	}
-
-	for key, value in extraData.items():
-		assert key not in ret
-		ret[key] = value
-	return ret
-
-def packChapterFragments(chapStr, fragStr):
-	if not chapStr and not fragStr:
-		return None
-	if not fragStr:
-		return chapStr
-
-	# Handle cases where the fragment is present,
-	# but the chapStr is None
-	if chapStr == None:
-		chapStr = 0
-
-	chap = float(chapStr)
-	frag = float(fragStr)
-	return '%0.2f' % (chap + (frag / 100.0))
 
 
 class DataParser():
@@ -93,8 +38,6 @@ class DataParser():
 
 		self.transfer = transfer
 
-		logPath = 'Main.Feeds.Parser'
-		self.log = logging.getLogger(logPath)
 		amqp_settings = {}
 		amqp_settings["RABBIT_CLIENT_NAME"] = settings.RABBIT_CLIENT_NAME
 		amqp_settings["RABBIT_LOGIN"]       = settings.RABBIT_LOGIN
@@ -105,7 +48,7 @@ class DataParser():
 
 		print("Transfer state:", self.amqp_connect)
 		if self.amqp_connect:
-			self.amqpint = FeedScrape.AmqpInterface.RabbitQueueHandler(settings=amqp_settings)
+			self.amqpint = AmqpInterface.RabbitQueueHandler(settings=amqp_settings)
 		else:
 			print("Not making rabbit connection.")
 		self.names = set()
@@ -328,6 +271,10 @@ class DataParser():
 			proc_str = "%s %s" % (item['tags'], item['title'])
 			proc_str = proc_str.replace("'", " ")
 			chp, vol = extractChapterVol(proc_str)
+
+			with open("out.txt", "a") as fp:
+				fp.write("'%s', '%s', '%s'\n" % (proc_str, chp, vol))
+			print(item['title'], item['tags'], proc_str, chp, vol)
 			if not (chp and vol):
 				return False
 
@@ -1691,6 +1638,7 @@ class DataParser():
 
 	def dispatchRelease(self, item, debug = False):
 
+
 		ret = False
 
 		if item['srcname'] == 'お兄ちゃん、やめてぇ！':  # I got utf-8 in my code-sauce, bizzickle
@@ -2059,7 +2007,10 @@ class DataParser():
 
 	def getProcessedReleaseInfo(self, feedDat, debug):
 
+
+
 		if any([item in feedDat['linkUrl'] for item in skip_filter]):
+			print("Skipping!")
 			return
 
 
@@ -2091,7 +2042,7 @@ class DataParser():
 		if any([item in feedDat['linkUrl'] for item in skip_filter]):
 			return
 
-		nicename = getNiceName(feedDat['linkUrl'])
+		nicename = feedNameLut.getNiceName(feedDat['linkUrl'])
 		if not nicename:
 			nicename = urllib.parse.urlparse(feedDat['linkUrl']).netloc
 

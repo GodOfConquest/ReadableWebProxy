@@ -11,13 +11,11 @@ import time
 import os.path
 import os
 import sys
-import psycopg2
 import sqlalchemy.exc
 
 from sqlalchemy import desc
 
 import WebMirror.util.urlFuncs
-import WebMirror.OutputFilters.FilterManager
 import urllib.parse
 import traceback
 import datetime
@@ -28,9 +26,8 @@ import WebMirror.util.webFunctions as webFunctions
 import hashlib
 from WebMirror.Fetch import DownloadException
 import WebMirror.Fetch
-
+import WebMirror.database as db
 from config import C_RESOURCE_DIR
-
 
 if "debug" in sys.argv:
 	CACHE_DURATION = 1
@@ -77,6 +74,7 @@ GLOBAL_BAD = [
 			'a.wikia-beacon.com',
 			'b.scorecardresearch.com',
 			'//mail.google.com',
+			'javascript:void',
 	]
 
 
@@ -162,16 +160,10 @@ class SiteArchiver(LogBase.LoggerMixin):
 	FETCH_DISTANCE = 1000 * 1000
 
 	def __init__(self, cookie_lock, run_filters=True):
-		# print("SiteArchiver __init__()")
+		print("SiteArchiver __init__()")
 		super().__init__()
 
-		import WebMirror.database as db
 		self.db = db
-
-		if run_filters:
-			self.filter = WebMirror.OutputFilters.FilterManager.FilterManager()
-		else:
-			self.filter = False
 
 		self.cookie_lock = cookie_lock
 
@@ -222,29 +214,27 @@ class SiteArchiver(LogBase.LoggerMixin):
 	#
 	########################################################################################################################
 
+	# Minimal proxy because I want to be able to call the fetcher without affecting the DB.
+	def fetch(self, job):
+		fetcher = self.fetcher(self.ruleset, job.url, job.starturl, self.cookie_lock, wg_handle=self.wg)
+		response = fetcher.fetch()
+		return response
+
 	# This is the main function that's called by the task management system.
 	# Retreive remote content at `url`, call the appropriate handler for the
 	# transferred content (e.g. is it an image/html page/binary file)
 	def dispatchRequest(self, job):
-		fetcher = self.fetcher(self.ruleset, job.url, job.starturl, self.cookie_lock, wg_handle=self.wg)
-		response = fetcher.fetch()
-
+		response = self.fetch(job)
 		if "file" in response:
 			# No title is present in a file response
-			if self.filter:
-				self.filter.processPage(job.url, '', response['content'], response['mimeType'])
 			self.upsertFileResponse(job, response)
+		elif 'rss-content' in response:
+			self.upsertRssItems(response['rss-content'], job.url)
+			self.upsertResponseLinks(job, plain=[entry['linkUrl'] for entry in response['rss-content']])
+
 		else:
-			if self.filter:
-				if "rawcontent" in response:
-					rawc = response['rawcontent']
-				else:
-					print("No raw content in response!")
-					print("Keys:", response.keys())
-					rawc = response['contents']
-				self.filter.processPage(job.url, response['title'], rawc, response['mimeType'])
 			self.upsertReponseContent(job, response)
-			self.upsertResponseLinks(job, response)
+			self.upsertResponseLinks(job, plain=response['plainLinks'], resource=response['rsrcLinks'])
 
 		# Reset the fetch time download
 
@@ -268,13 +258,84 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 				job.fetchtime = datetime.datetime.now()
 
-				self.db.session.flush()
-				self.db.session.commit()
+				self.db.get_session().flush()
+				self.db.get_session().commit()
 				break
 			except sqlalchemy.exc.OperationalError:
-				self.db.session.rollback()
+				self.db.get_session().rollback()
 			except sqlalchemy.exc.InvalidRequestError:
-				self.db.session.rollback()
+				self.db.get_session().rollback()
+
+	def insertRssItem(self, entry, feedurl):
+
+		have = self.db.get_session().query(self.db.FeedItems) \
+			.filter(self.db.FeedItems.contentid == entry['guid'])   \
+			.limit(1)                                  \
+			.scalar()
+
+
+
+		if have:
+			return
+		else:
+			assert ("srcname" in entry), "'srcname' not in entry for item from '%s' (contenturl: '%s', title: '%s', guid: '%s')" % (feedurl, entry['linkUrl'], entry['title'], entry['guid'])
+
+			authors     = [tmp['name'] for tmp in entry['authors'] if 'name' in tmp]
+
+			# Deduplicate repeat tags of the differing case.
+			tags = {}
+			for tag in entry['tags']:
+				tags[tag.lower()] = tag
+
+			new = self.db.FeedItems(
+					contentid  = entry['guid'],
+					title      = entry['title'],
+					srcname    = entry['srcname'],
+					feedurl    = feedurl,
+					contenturl = entry['linkUrl'],
+
+					type       = entry['feedtype'],
+					contents   = entry['contents'],
+
+					author     = authors,
+					tags       = list(tags.values()),
+
+					updated    = datetime.datetime.fromtimestamp(entry['updated']),
+					published  = datetime.datetime.fromtimestamp(entry['published'])
+				)
+
+			self.db.get_session().add(new)
+			self.db.get_session().commit()
+
+
+
+
+	def upsertRssItems(self, entrylist, feedurl):
+		# print("InsertFeed!")
+		for feedentry in entrylist:
+			# print(feedentry)
+			# print(feedentry.keys())
+			# print(feedentry['contents'])
+			# print(feedentry['published'])
+
+
+			while 1:
+				try:
+					self.insertRssItem(feedentry, feedurl)
+					break
+
+				except sqlalchemy.exc.InvalidRequestError:
+					print("InvalidRequest error!")
+					self.db.get_session().rollback()
+					traceback.print_exc()
+				except sqlalchemy.exc.OperationalError:
+					print("InvalidRequest error!")
+					self.db.get_session().rollback()
+				except sqlalchemy.exc.IntegrityError:
+					print("[upsertRssItems] -> Integrity error!")
+					traceback.print_exc()
+					self.db.get_session().rollback()
+
 
 	# Todo: FIXME
 	def filterContentLinks(self, job, links, badwords):
@@ -306,9 +367,9 @@ class SiteArchiver(LogBase.LoggerMixin):
 				ret.add(link)
 		return ret
 
-	def upsertResponseLinks(self, job, response):
-		plain    = set(response['plainLinks'])
-		resource = set(response['rsrcLinks'])
+	def upsertResponseLinks(self, job, plain=[], resource=[]):
+		plain    = set(plain)
+		resource = set(resource)
 
 		unfiltered = len(plain)+len(resource)
 		badwords = GLOBAL_BAD
@@ -358,16 +419,16 @@ class SiteArchiver(LogBase.LoggerMixin):
 								(:url, :starturl, :netloc, :distance, :is_text, :priority, :type, :fetchtime)
 							ON CONFLICT DO NOTHING
 							""")
-					self.db.session.execute(cmd, params=new)
+					self.db.get_session().execute(cmd, params=new)
 
-				self.db.session.commit()
+				self.db.get_session().commit()
 				break
 			except sqlalchemy.exc.InternalError:
 				self.log.info("Transaction error. Retrying.")
-				self.db.session.rollback()
+				self.db.get_session().rollback()
 			except sqlalchemy.exc.OperationalError:
 				self.log.info("Transaction error. Retrying.")
-				self.db.session.rollback()
+				self.db.get_session().rollback()
 
 		self.log.info("Links upserted.")
 
@@ -384,13 +445,13 @@ class SiteArchiver(LogBase.LoggerMixin):
 		# Look for existing files with the same MD5sum. If there are any, just point the new file at the
 		# fsPath of the existing one, rather then creating a new file on-disk.
 
-		have = self.db.session.query(self.db.WebFiles) \
+		have = self.db.get_session().query(self.db.WebFiles) \
 			.filter(self.db.WebFiles.fhash == fHash)   \
 			.limit(1)                                  \
 			.scalar()
 
 		if have:
-			match = self.db.session.query(self.db.WebFiles)              \
+			match = self.db.get_session().query(self.db.WebFiles)              \
 				.filter(self.db.WebFiles.fhash == fHash)                \
 				.filter(self.db.WebFiles.filename == response['fName']) \
 				.limit(1)                                               \
@@ -403,8 +464,8 @@ class SiteArchiver(LogBase.LoggerMixin):
 					fhash    = fHash,
 					fspath   = have.fspath,
 					)
-				self.db.session.add(new)
-				self.db.session.commit()
+				self.db.get_session().add(new)
+				self.db.get_session().commit()
 				job.file = new.id
 		else:
 			savedpath = saveCoverFile(response['content'], fHash, response['fName'])
@@ -413,8 +474,8 @@ class SiteArchiver(LogBase.LoggerMixin):
 				fhash    = fHash,
 				fspath   = savedpath,
 				)
-			self.db.session.add(new)
-			self.db.session.commit()
+			self.db.get_session().add(new)
+			self.db.get_session().commit()
 			job.file = new.id
 
 		job.state     = 'complete'
@@ -422,7 +483,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 		job.fetchtime = datetime.datetime.now()
 
 		job.mimetype = response['mimeType']
-		self.db.session.commit()
+		self.db.get_session().commit()
 
 		# print("have:", have)
 
@@ -444,11 +505,11 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 	def resetDlstate(self):
 
-		# self.db.session.begin()
-		self.db.session.query(self.db.WebPages) \
+		# self.db.get_session().begin()
+		self.db.get_session().query(self.db.WebPages) \
 			.filter((self.db.WebPages.state == "fetching") | (self.db.WebPages.state == "processing"))   \
 			.update({self.db.WebPages.state : "new"})
-		self.db.session.commit()
+		self.db.get_session().commit()
 
 
 	def getTask(self):
@@ -457,13 +518,13 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 		Also updates the row to be in the "fetching" state.
 		'''
-		# self.db.session.begin()
+		# self.db.get_session().begin()
 
 		# Try to get a task untill we are explicitly out of tasks,
 		# or we succeed.
 		while 1:
 			try:
-				query = self.db.session.query(self.db.WebPages)         \
+				query = self.db.get_session().query(self.db.WebPages)         \
 					.filter(self.db.WebPages.state == "new")            \
 					.filter(self.db.WebPages.distance < (self.db.MAX_DISTANCE)) \
 					.order_by(self.db.WebPages.priority)                \
@@ -475,21 +536,21 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 				job = query.scalar()
 				if not job:
-					self.db.session.flush()
-					self.db.session.commit()
+					self.db.get_session().flush()
+					self.db.get_session().commit()
 					return False
 
 				if job.state != "new":
 					raise ValueError("Wat?")
 				job.state = "fetching"
 
-				self.db.session.flush()
-				self.db.session.commit()
+				self.db.get_session().flush()
+				self.db.get_session().commit()
 				return job
 			except sqlalchemy.exc.OperationalError:
-				self.db.session.rollback()
+				self.db.get_session().rollback()
 			except sqlalchemy.exc.InvalidRequestError:
-				self.db.session.rollback()
+				self.db.get_session().rollback()
 
 
 
@@ -519,6 +580,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 				self.log.error("`DownloadException` Exception when downloading.")
 			except KeyboardInterrupt:
 				runStatus.run = False
+				runStatus.run_state.value = 0
 				print("Keyboard Interrupt!")
 
 		else:
@@ -537,16 +599,16 @@ class SiteArchiver(LogBase.LoggerMixin):
 		# just do a simple check for the row first. That'll
 		# probably be faster in the /great/ majority of cases.
 		while 1:
-			# self.db.session.begin()
+			# self.db.get_session().begin()
 			try:
-				row =  self.db.session.query(self.db.WebPages) \
+				row =  self.db.get_session().query(self.db.WebPages) \
 					.filter(self.db.WebPages.url == url)       \
 					.scalar()
 
-				self.db.session.commit()
+				self.db.get_session().commit()
 				break
 			except sqlalchemy.exc.InvalidRequestError:
-				self.db.session.rollback()
+				self.db.get_session().rollback()
 
 
 		if row:
@@ -575,25 +637,25 @@ class SiteArchiver(LogBase.LoggerMixin):
 			# fetch the row inserted by another thread at the same time.
 			while 1:
 				try:
-					# self.db.session.begin()
-					self.db.session.add(row)
-					self.db.session.commit()
+					# self.db.get_session().begin()
+					self.db.get_session().add(row)
+					self.db.get_session().commit()
 					print("Row added?")
 					break
 				except sqlalchemy.exc.InvalidRequestError:
 					print("InvalidRequest error!")
-					self.db.session.rollback()
+					self.db.get_session().rollback()
 					traceback.print_exc()
 				except sqlalchemy.exc.OperationalError:
 					print("InvalidRequest error!")
-					self.db.session.rollback()
+					self.db.get_session().rollback()
 				except sqlalchemy.exc.IntegrityError:
-					print("Integrity error!")
-					self.db.session.rollback()
-					row =  query = self.db.session.query(self.db.WebPages) \
+					print("[synchronousJobRequest] -> Integrity error!")
+					self.db.get_session().rollback()
+					row =  query = self.db.get_session().query(self.db.WebPages) \
 						.filter(self.db.WebPages.url == url)               \
 						.one()
-					self.db.session.commit()
+					self.db.get_session().commit()
 					break
 
 		thresh_text_ago = datetime.datetime.now() - datetime.timedelta(seconds=CACHE_DURATION)
@@ -626,14 +688,13 @@ class SiteArchiver(LogBase.LoggerMixin):
 		self.dispatchRequest(row)
 
 		# Commit, because why not
-		self.db.session.commit()
+		self.db.get_session().commit()
 
 		return row
 
 
 def test():
 	archiver = SiteArchiver(None)
-	import WebMirror.database as db
 
 	new = {
 		'url'       : 'http://www.royalroadl.com/fiction/1484',
@@ -655,7 +716,7 @@ def test():
 			ON CONFLICT DO NOTHING
 			""")
 	print("doing")
-	ins = archiver.db.session.execute(cmd, params=new)
+	ins = archiver.db.get_session().execute(cmd, params=new)
 	print("Done. Ret:")
 	print(ins)
 	# print(archiver.resetDlstate())

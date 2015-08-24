@@ -8,24 +8,29 @@ import WebMirror.Runner
 import WebMirror.rules
 import sys
 import datetime
+import config
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ProcessPoolExecutor
 from apscheduler.jobstores.memory import MemoryJobStore
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 import activePlugins
 
 executors = {
-	'main_jobstore': ProcessPoolExecutor(20),
+	'main_jobstore': ProcessPoolExecutor(10),
 }
 job_defaults = {
 	'coalesce': True,
 	'max_instances': 1
 }
 
+SQLALCHEMY_DATABASE_URI = 'postgresql://{user}:{passwd}@{host}:5432/{database}'.format(user=config.C_DATABASE_USER, passwd=config.C_DATABASE_PASS, host=config.C_DATABASE_IP, database=config.C_DATABASE_DB_NAME)
+
 jobstores = {
 
-	'main_jobstore' : MemoryJobStore(),
+	'transient_jobstore' : MemoryJobStore(),
+	'main_jobstore'      : SQLAlchemyJobStore(url=SQLALCHEMY_DATABASE_URI)
 
 }
 
@@ -57,6 +62,16 @@ def scheduleJobs(sched, timeToStart):
 		jId = callee.__name__
 		activeJobs.append(jId)
 		if not sched.get_job(jId):
+
+			# Jobs that are called less often then once every 4 hours get placed
+			# in the main jobstore.
+			# More ephemeral jobs get stored in the memory jobstore.
+			if interval < (60 * 60 * 4):
+				jobstore = "transient_jobstore"
+			else:
+				jobstore = "main_jobstore"
+
+
 			sched.add_job(callMod,
 						args=(callee.__name__, ),
 						trigger='interval',
@@ -64,32 +79,33 @@ def scheduleJobs(sched, timeToStart):
 						start_date=startWhen,
 						id=jId,
 						replace_existing=True,
-						jobstore='main_jobstore',
+						jobstore=jobstore,
 						misfire_grace_time=2**30)
 
 
+	for job in sched.get_jobs('main_jobstore'):
+		if not job.id in activeJobs:
+			sched.remove_job(job.id, 'main_jobstore')
 
 
 def go():
-	if "init" in sys.argv:
 
-		rules = WebMirror.rules.load_rules()
-		WebMirror.Runner.initializeStartUrls(rules)
-	else:
+	rules = WebMirror.rules.load_rules()
+	WebMirror.Runner.initializeStartUrls(rules)
 
-		sched = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults)
+	sched = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults)
 
-		# startTime = datetime.datetime.now()+datetime.timedelta(seconds=60*60)
-		# startTime = datetime.datetime.now()+datetime.timedelta(seconds=60*15)
-		# startTime = datetime.datetime.now()+datetime.timedelta(seconds=60*5)
-		# startTime = datetime.datetime.now()+datetime.timedelta(seconds=20)
-		startTime = datetime.datetime.now()+datetime.timedelta(seconds=10)
-		scheduleJobs(sched, startTime)
-		sched.start()
+	# startTime = datetime.datetime.now()+datetime.timedelta(seconds=60*60)
+	# startTime = datetime.datetime.now()+datetime.timedelta(seconds=60*15)
+	# startTime = datetime.datetime.now()+datetime.timedelta(seconds=60*5)
+	# startTime = datetime.datetime.now()+datetime.timedelta(seconds=20)
+	startTime = datetime.datetime.now()+datetime.timedelta(seconds=10)
+	scheduleJobs(sched, startTime)
+	sched.start()
 
 
-		runner = WebMirror.Runner.Crawler()
-		runner.run()
+	runner = WebMirror.Runner.Crawler()
+	runner.run()
 
 	# print("Thread halted. App exiting.")
 
