@@ -9,7 +9,7 @@ from flask import render_template
 from flask import send_file
 from flask import g
 from flask.ext.login import current_user
-from flask.ext.sqlalchemy import get_debug_queries
+# from flask.ext.sqlalchemy import get_debug_queries
 
 import WebMirror.Engine
 
@@ -27,6 +27,7 @@ import app.book_tree.book_views    as book_views
 
 import app.sub_views.content_views as content_views
 import app.sub_views.rss_views     as rss_views
+import app.sub_views.search_views  as search_views
 
 
 @lm.user_loader

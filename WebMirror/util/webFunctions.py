@@ -17,7 +17,7 @@ import re
 import gzip
 import io
 import socket
-
+import json
 import base64
 
 import random
@@ -212,6 +212,38 @@ class WebGetRobust:
 
 		soup = bs4.BeautifulSoup(page, "lxml")
 		return soup
+
+	def getJson(self, *args, **kwargs):
+		if 'returnMultiple' in kwargs and kwargs['returnMultiple']:
+			raise ValueError("getSoup cannot be called with 'returnMultiple' being true")
+
+		attempts = 0
+		while 1:
+			try:
+				page = self.getpage(*args, **kwargs)
+				page = page.strip()
+				if isinstance(page, bytes):
+					raise ValueError("Received content not decoded! Cannot parse!")
+				ret = json.loads(page)
+				return ret
+			except ValueError:
+				if attempts < 1:
+					attempts += 1
+					self.log.error("JSON Parsing issue retreiving content from page!")
+					for line in traceback.format_exc().split("\n"):
+						self.log.error("%s", line.rstrip())
+					self.log.error("Retrying!")
+
+					# Scramble our current UA
+					self.browserHeaders = getUserAgent()
+					time.sleep(3)
+				else:
+					self.log.error("JSON Parsing issue, and retries exhausted!")
+					# self.log.error("Page content:")
+					# self.log.error(page)
+					# with open("Error-ctnt-{}.json".format(time.time()), "w") as tmp_err_fp:
+					# 	tmp_err_fp.write(page)
+					raise
 
 
 	def getFileAndName(self, *args, **kwargs):

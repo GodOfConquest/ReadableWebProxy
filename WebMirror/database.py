@@ -85,7 +85,7 @@ itemtype_enum  = ENUM('western', 'eastern', 'unknown',            name='itemtype
 class WebPages(Base):
 	__tablename__ = 'web_pages'
 	id           = Column(Integer, primary_key = True)
-	state        = Column(dlstate_enum, default='new', index=True)
+	state        = Column(dlstate_enum, default='new', index=True, nullable=False)
 	errno        = Column(Integer, default='0')
 	url          = Column(Text, nullable = False, index = True, unique = True)
 	starturl     = Column(Text, nullable = False)
@@ -218,3 +218,23 @@ Base.metadata.create_all(bind=get_engine(), checkfirst=True)
 
 
 
+# More indexes:
+#
+# CREATE INDEX idx_web_pages_title ON web_pages USING gin(to_tsvector('english', title));
+# CREATE INDEX idx_web_pages_content ON web_pages USING gin(to_tsvector('english', content));
+#
+
+
+# SELECT relname AS "relation", pg_size_pretty(pg_relation_size(C.oid)) AS "size"
+#   FROM pg_class C LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+#   WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+#   ORDER BY pg_relation_size(C.oid) DESC;
+
+# SELECT relname AS "relation",
+#     pg_size_pretty(pg_total_relation_size(C.oid)) AS "total_size"
+#   FROM pg_class C
+#   LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+#   WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+#     AND C.relkind <> 'i'
+#     AND nspname !~ '^pg_toast'
+#   ORDER BY pg_total_relation_size(C.oid) DESC;

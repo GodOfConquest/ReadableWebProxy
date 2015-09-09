@@ -21,6 +21,7 @@ import traceback
 import datetime
 
 from sqlalchemy.sql import text
+from sqlalchemy.sql import func
 import WebMirror.util.webFunctions as webFunctions
 
 import hashlib
@@ -35,7 +36,7 @@ if "debug" in sys.argv:
 	# CACHE_DURATION = 60 * 5
 	# RSC_CACHE_DURATION = 60 * 60 * 5
 else:
-	CACHE_DURATION = 60 * 60 * 24 * 3
+	CACHE_DURATION = 60 * 60 * 24 * 7
 	RSC_CACHE_DURATION = 60 * 60 * 24 * 14
 
 
@@ -367,17 +368,22 @@ class SiteArchiver(LogBase.LoggerMixin):
 				ret.add(link)
 		return ret
 
-	def upsertResponseLinks(self, job, plain=[], resource=[]):
-		plain    = set(plain)
-		resource = set(resource)
-
-		unfiltered = len(plain)+len(resource)
+	def getBadWords(self, job):
 		badwords = GLOBAL_BAD
 		for item in [rules for rules in self.ruleset if rules['netlocs'] and job.netloc in rules['netlocs']]:
 			badwords += item['badwords']
 
 		# A "None" can occationally crop up. Filter it.
 		badwords = [badword for badword in badwords if badword]
+		return badwords
+
+	def upsertResponseLinks(self, job, plain=[], resource=[]):
+		plain    = set(plain)
+		resource = set(resource)
+
+		unfiltered = len(plain)+len(resource)
+
+		badwords = self.getBadWords(job)
 
 		plain    = self.filterContentLinks(job,  plain,    badwords)
 		resource = self.filterResourceLinks(job, resource, badwords)
@@ -407,6 +413,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 						'is_text'   : istext,
 						'priority'  : job.priority,
 						'type'      : job.type,
+						'state'     : "new",
 						'fetchtime' : datetime.datetime.now(),
 						}
 
@@ -414,9 +421,9 @@ class SiteArchiver(LogBase.LoggerMixin):
 					cmd = text("""
 							INSERT INTO
 								web_pages
-								(url, starturl, netloc, distance, is_text, priority, type, fetchtime)
+								(url, starturl, netloc, distance, is_text, priority, type, fetchtime, state)
 							VALUES
-								(:url, :starturl, :netloc, :distance, :is_text, :priority, :type, :fetchtime)
+								(:url, :starturl, :netloc, :distance, :is_text, :priority, :type, :fetchtime, :state)
 							ON CONFLICT DO NOTHING
 							""")
 					self.db.get_session().execute(cmd, params=new)
@@ -503,13 +510,6 @@ class SiteArchiver(LogBase.LoggerMixin):
 	########################################################################################################################
 
 
-	def resetDlstate(self):
-
-		# self.db.get_session().begin()
-		self.db.get_session().query(self.db.WebPages) \
-			.filter((self.db.WebPages.state == "fetching") | (self.db.WebPages.state == "processing"))   \
-			.update({self.db.WebPages.state : "new"})
-		self.db.get_session().commit()
 
 
 	def getTask(self):
@@ -524,15 +524,22 @@ class SiteArchiver(LogBase.LoggerMixin):
 		# or we succeed.
 		while 1:
 			try:
-				query = self.db.get_session().query(self.db.WebPages)         \
-					.filter(self.db.WebPages.state == "new")            \
+				subq = self.db.get_session().query(func.min(self.db.WebPages.priority)) \
+					.filter(self.db.WebPages.state == "new")                            \
+					.filter(self.db.WebPages.distance < (self.db.MAX_DISTANCE))
+
+				query = self.db.get_session().query(self.db.WebPages)           \
+					.filter(self.db.WebPages.state == "new")                    \
+					.filter(self.db.WebPages.priority == subq)                  \
 					.filter(self.db.WebPages.distance < (self.db.MAX_DISTANCE)) \
-					.order_by(self.db.WebPages.priority)                \
-					.order_by(desc(self.db.WebPages.is_text))           \
-					.order_by(desc(self.db.WebPages.addtime))           \
-					.order_by(self.db.WebPages.distance)                \
-					.order_by(self.db.WebPages.url)                     \
 					.limit(1)
+
+					# This compound order_by completely, COMPLETELY tanked the
+					# time of this query. As it was, it took > 2 seconds per query!
+					# .order_by(desc(self.db.WebPages.is_text))           \
+					# .order_by(desc(self.db.WebPages.addtime))           \
+					# .order_by(self.db.WebPages.distance)                \
+					# .order_by(self.db.WebPages.url)                     \
 
 				job = query.scalar()
 				if not job:
@@ -568,7 +575,17 @@ class SiteArchiver(LogBase.LoggerMixin):
 				job.raw_content = content
 				job.state = 'error'
 				job.errno = -1
+				self.db.get_session().commit()
 				self.log.error("`urllib.error.URLError` Exception when downloading.")
+			except ValueError:
+				content = "DOWNLOAD FAILED - ValueError"
+				content += "<br>"
+				content += traceback.format_exc()
+				job.content = content
+				job.raw_content = content
+				job.state = 'error'
+				job.errno = -3
+				self.db.get_session().commit()
 			except DownloadException:
 				content = "DOWNLOAD FAILED - DownloadException"
 				content += "<br>"
@@ -577,6 +594,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 				job.raw_content = content
 				job.state = 'error'
 				job.errno = -2
+				self.db.get_session().commit()
 				self.log.error("`DownloadException` Exception when downloading.")
 			except KeyboardInterrupt:
 				runStatus.run = False
@@ -716,11 +734,11 @@ def test():
 			ON CONFLICT DO NOTHING
 			""")
 	print("doing")
-	ins = archiver.db.get_session().execute(cmd, params=new)
-	print("Done. Ret:")
-	print(ins)
+	# ins = archiver.db.get_session().execute(cmd, params=new)
+	# print("Doneself. Ret:")
+	# print(ins)
 	# print(archiver.resetDlstate())
-	# print(archiver.getTask())
+	print(archiver.getTask())
 	# print(archiver.getTask())
 	# print(archiver.getTask())
 	# print(archiver.taskProcess())

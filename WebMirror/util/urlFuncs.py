@@ -44,14 +44,13 @@ urlContainingTargets = [
 	(True,  'img',        'usemap'),
 ]
 
-
-class CannotAccessGDocException(Exception):
-	pass
+from WebMirror.Exceptions import CannotAccessGDocException
 
 
 
 def trimGDocUrl(rawUrl):
-
+	# if "docs.google.com" in rawUrl:
+	# 	print("Trimming URL: ", rawUrl)
 
 	url = rawUrl.split("#")[0]
 
@@ -93,10 +92,11 @@ def trimGDocUrl(rawUrl):
 			"/view",
 			"/mobilebasic",
 			"/mobilebasic?viewopt=127",
-			"/pub?embedded=true",
+			"?embedded=true",
+			"?embedded=false",
 			]
 
-		gdocBaseRe = re.compile(r'(https?://docs.google.com/document/d/[-_0-9a-zA-Z]+)(.*)$')
+		gdocBaseRe = re.compile(r'(https?://docs.google.com/document/d/[-_0-9a-zA-Z]+(?:/pub)?)(.*)$')
 		simpleCheck = gdocBaseRe.search(url)
 		if simpleCheck:
 			if any([item in simpleCheck.group(2) for item in strip]):
@@ -105,6 +105,9 @@ def trimGDocUrl(rawUrl):
 		for ending in strip:
 			if url.endswith(ending):
 				url = url[:-len(ending)]
+
+	# if "docs.google.com" in url:
+	# 	print("Trimmed URL: ", url)
 
 	# if url.endswith("/pub"):
 	# 	url = url[:-3]
@@ -187,13 +190,14 @@ def rebaseUrl(url, base):
 	"""Rebase one url according to base"""
 
 	parsed = urllib.parse.urlparse(url)
+
 	if parsed.scheme == parsed.netloc == '':
 		return urllib.parse.urljoin(base, url)
 	else:
 		return url
 
 def canonizeUrls(soup, pageUrl):
-
+	print("Canonizing for page: ", pageUrl)
 	for (dummy_isimg, tag, attr) in urlContainingTargets:
 		for link in soup.findAll(tag):
 			try:

@@ -1,0 +1,57 @@
+<!-- extend base layout -->
+{% extends "__base.html" %}
+
+{% import '_macros.html' as util_macros %}
+
+
+{%- macro search_results(results) -%}
+	<table class='table-striped table table-bordered table-condensed fullwidth' style="table-layout: fixed;">
+	<colgroup>
+		<col />
+		<col style="width: 40%;" />
+		<col style="width: 10%;" />
+	</colgroup>
+	<tr>
+		<th>
+			Title
+		</th>
+		<th>
+			URL
+		</th>
+		<th>
+			Match Quality
+		</th>
+	</tr>
+
+	{%- for entry in results: -%}
+
+			<tr>
+			<td>
+				<a href='/view?url={{entry.url | urlencode}}'>{{entry.title}}</a>
+			</td>
+			<td>
+				{{entry.url}}
+			</td>
+			<td>
+
+			</td>
+		</tr>
+
+	{%- endfor -%}
+
+	</table>
+{%- endmacro -%}
+
+{% block content %}
+	{% include '_block_flash.html' %}
+	<div class="well">
+		<h4>{{ header }}</h4>
+
+		{{ util_macros.render_pagination(sequence_item) }}
+		<div>
+		{{ search_results(sequence_item.items) }}
+		</div>
+		{{ util_macros.render_pagination(sequence_item) }}
+	</div>
+
+{% endblock %}

@@ -14,6 +14,10 @@ import WebMirror.Engine
 import runStatus
 import WebMirror.database as db
 
+
+PROCESSES = 16
+# PROCESSES = 1
+
 # For synchronizing saving cookies to disk
 cookie_lock = multiprocessing.Lock()
 
@@ -44,7 +48,6 @@ class RunInstance(object):
 
 			if runStatus.run_state.value == 1:
 				self.do_task()
-				time.sleep(1)
 			else:
 				self.log.info("Thread %s exiting.", self.num)
 				break
@@ -90,6 +93,16 @@ def initializeStartUrls(rules):
 		db.get_session().commit()
 
 
+def resetInProgress():
+	print("Resetting any stalled downloads from the previous session.")
+
+	# db.get_session().begin()
+	db.get_session().query(db.WebPages) \
+		.filter((db.WebPages.state == "fetching") | (db.WebPages.state == "processing"))   \
+		.update({db.WebPages.state : "new"})
+	db.get_session().commit()
+
+
 
 class Crawler(object):
 	def __init__(self):
@@ -98,12 +111,17 @@ class Crawler(object):
 
 	def run(self):
 
-		PROCESSES = 8
 		tasks =[]
 		cnt = 0
 		procno = 0
 
-		if PROCESSES > 1:
+		if PROCESSES == 1:
+			self.log.info("Running in single process mode!")
+			RunInstance.run(procno, self.rules, nosig=False)
+
+		elif PROCESSES < 1:
+			self.log.error("Wat?")
+		elif PROCESSES > 1:
 			try:
 				while runStatus.run_state.value:
 					time.sleep(1)
@@ -137,10 +155,6 @@ class Crawler(object):
 					break
 
 			self.log.info("All processes halted.")
-		else:
-			self.log.info("Running in single process mode!")
-			RunInstance.run(procno, self.rules, nosig=False)
-
 
 
 if __name__ == "__main__":

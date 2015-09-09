@@ -1,17 +1,13 @@
 
-type: eastern
-
 
 FOLLOW_GOOGLE_LINKS: False
 allImages: False
 
+type: "western"
 
 baseUrl: [
-	"http://storiesonline.net/",
-
-	]
-extraStartUrls: [
-	'http://storiesonline.net/home.php'
+	"https://www.fictionpress.com/",
+	"http://www.fictionpress.com/",
 	]
 
 badwords: [
@@ -19,11 +15,6 @@ badwords: [
 			"/join-us/",
 			"/chat/",
 			'&format=pdf',
-			'/adpeeps/',
-			'/ads/',
-			'/java/',
-			'/globals/',
-			'adpeeps.php',
 			'?format=pdf',
 			'?replytocom=',
 			"/forum/",
@@ -34,17 +25,9 @@ badwords: [
 			"/betareaders/",
 			"/poetry/", # Really?
 
-			"/MyAccount/",
-
-			"/login.php",
-
 			"/post.php?",
 			"/author.php?",
-			"big.oscar.aol.com",
-
-			'ne.adult-fanfiction.org',   # Non-english
-
-			'review.php?', # Filter reviews (possibly should be revisited?)
+			"fictionpress.com/atom/u/",
 			]
 
 # Content Stripping needs to be determined.
@@ -53,7 +36,28 @@ decomposeBefore: [
 ]
 
 decompose: [
-
+	{'id' : "top"},
+	{'id' : "p_footer"},
+	{'id' : "profile_top"},
+	{'id' : "review"},
+	{'class' : "zmenu"},
+	{'class' : "lc-wrapper"},
 ]
 
 stripTitle: []
+
+
+destyle : [
+	["div",  {}],
+	["span", {}],
+]
+
+
+preserveAttrs : [
+	["button", 'id'],
+	["button", 'onclick'],
+	["button", 'type'],
+	["button", 'btn'],
+	["select", ''],
+]
+
