@@ -1,0 +1,115 @@
+<!-- extend base layout -->
+{% extends "__base.html" %}
+
+{% block content %}
+	{% include '_block_flash.html' %}
+	<div class="well">
+
+
+		<h2>Scheduler</h2>
+
+		<div class="well">
+
+			<h4>
+				Run States:
+			</h4>
+			<div>
+				<table style='width:100%'>
+					<colgroup>
+						<col  style='width:10%'>
+						<col  style='width:30%'>
+						<col>
+						<col  style='width:20%'>
+						<col  style='width:20%'>
+					</colgroup>
+					<tr>
+						<th>Running</th>
+						<th>Name</th>
+						<th>Last Run</th>
+						<th>RunTime</th>
+						<th>Last error</th>
+					</tr>
+					{%- for state in states -%}
+						<tr>
+							<td>{{state.is_running}}</td>
+							<td>{{state.plugin_name}}</td>
+							<td>{{ago(state.last_run)}}</td>
+							<td>{{state.last_run_end - state.last_run}}</td>
+							<td>{{ago(state.last_error)}}</td>
+						</tr>
+						{% if state.last_error and state.last_error_msg != None %}
+							</table>
+							<div style='margin-left: 75px; margin-top: 5px;'>
+								Error:
+								<pre>{{state.last_error_msg}}</pre>
+							</div>
+
+
+							<table style='width:100%'>
+							<colgroup>
+								<col  style='width:10%'>
+								<col  style='width:30%'>
+								<col>
+								<col  style='width:20%'>
+								<col  style='width:20%'>
+							</colgroup>
+						{% endif %}
+					{%- endfor -%}
+				</table>
+			</div>
+
+
+			<h4>Job Status</h4>
+			<table style='width:100%'>
+				<tr>
+					<th style='width:40%'>
+						Job Name
+					</th>
+					<th style='width:30%'>
+						Seconds until exec
+					</th>
+					<th style='width:30%'>
+						Next called in
+					</th>
+				</tr>
+				{%- for name, ts, value in tasks -%}
+					<tr>
+						<td>{{name}}</td>
+						<td>{{ts}}</td>
+						<td>{{value['time_til_job']}}</td>
+
+					</tr>
+				{%- endfor -%}
+			</table>
+
+
+			<h4>Job Internals:</h4>
+			{%- for name, ts, value in tasks -%}
+				<div class="well">
+					<h5>{{name}}</h5>
+					<div>
+						<table style='width:100%'>
+							{%- for key, val in value.items() -%}
+								<tr>
+									<td>{{key}}</td>
+									<td>{{val}}</td>
+								</tr>
+							{%- endfor -%}
+
+						</table>
+					</div>
+				</div>
+			{%- endfor -%}
+
+		</div>
+	</div>
+
+{% endblock %}
+
+
+{% block footer %}
+	{% if g.user.is_mod() %}
+		{% include '_block_admin_scripts.html' %}
+	{% endif %}
+{% endblock %}
+

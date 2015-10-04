@@ -14,9 +14,10 @@ import re
 import calendar
 import datetime
 import time
+import urllib.parse
 import json
 
-MIN_RATING = 5
+MIN_RATING = 2.5
 
 ########################################################################################################################
 #
@@ -33,7 +34,7 @@ MIN_RATING = 5
 
 
 
-class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
+class JapTemSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 
 
 	wanted_mimetypes = [
@@ -42,13 +43,13 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 						]
 	want_priority    = 50
 
-	loggerPath = "Main.Filter.RoyalRoad.Page"
+	loggerPath = "Main.Filter.JapTem"
 
 
 	@staticmethod
 	def wantsUrl(url):
-		if re.search(r"^http://(?:www\.)?royalroadl\.com/fiction/\d+/?$", url):
-			print("RRLSeriesPageProcessor Wants url: '%s'" % url)
+		if re.search(r"^http://japtem.com/fanfic.php$", url):
+			print("JapTemSeriesPageProcessor Wants url: '%s'" % url)
 			return True
 		return False
 
@@ -62,8 +63,16 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 		self.content    = kwargs['pgContent']
 		self.type       = kwargs['type']
 
-		self.log.info("Processing RoyalRoadL Item")
-		super().__init__(**kwargs)
+		self.log.info("Processing RSS Item")
+
+		if "dosuper" in kwargs:
+			dosuper = kwargs['dosuper']
+		else:
+			dosuper = True
+
+
+		if dosuper:
+			super().__init__(**kwargs)
 
 
 ##################################################################################################################################
@@ -72,31 +81,43 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 
 
 	def extractSeriesReleases(self, seriesPageUrl, soup):
-
-		titletg  = soup.find("h1", class_='fiction-title')
-		authortg = soup.find("span", class_='author')
-		ratingtg = soup.find("span", class_='overall')
-
+		title  = soup.find("div", class_='fanfic_title_div').get_text()
+		author = soup.find("div", class_='fanfic_author_div').get_text()
+		ratingtg = soup.find("div", class_='fanfic_title_wrapper')
+		ratingtg = [item for item in ratingtg.contents if "Rating" in str(item)]
 		if not ratingtg:
-			return []
-
-		if not float(ratingtg['score']) >= MIN_RATING:
-			return []
-
-		if not titletg:
-			return []
-		if not authortg:
-			return []
-		if not ratingtg:
-			return []
-
-		title  = titletg.get_text()
-		author = authortg.get_text()
-		assert author.startswith("by ")
-		author = author[2:].strip()
+			ratingtg = ''
+		else:
+			ratingtg = ratingtg.pop()
 
 
-		descDiv = soup.find('div', class_='description')
+		if "no rating" in ratingtg.lower():
+			return []
+
+		rating, views, chapters = ratingtg.split("·")
+		rating_score = float(rating.split()[-1])
+
+		if not rating_score >= MIN_RATING:
+			return []
+
+
+		chapter_num = float(chapters.split()[0])
+		if chapter_num < 3:
+			return []
+
+
+
+		if not title:
+			return []
+		if not author:
+			return []
+
+
+		descDiv = soup.find('div', class_='fanfic_synopsis')
+
+		if not descDiv:
+			print(soup)
+
 		paras = descDiv.find_all("p")
 		tags = []
 
@@ -115,66 +136,73 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 		seriesmeta['title']       = title
 		seriesmeta['author']      = author
 		seriesmeta['tags']        = tags
-		seriesmeta['homepage']    = seriesPageUrl
+		seriesmeta['homepage']    = ''
 		seriesmeta['desc']        = " ".join([str(para) for para in desc])
 		seriesmeta['tl_type']     = 'oel'
-		seriesmeta['sourcesite']  = 'RoyalRoadL'
+		seriesmeta['sourcesite']  = 'JapTem'
 
-		pkt = msgpackers.sendSeriesInfoPacket(seriesmeta)
+
+		meta_pkt = msgpackers.sendSeriesInfoPacket(seriesmeta)
 
 		extra = {}
 		extra['tags']     = tags
-		extra['homepage'] = seriesPageUrl
-		extra['sourcesite']  = 'RoyalRoadL'
-
-
-		chapters = soup.find("div", class_='chapters')
-		releases = chapters.find_all('li', class_='chapter')
+		extra['homepage'] = ''
+		extra['sourcesite']  = 'JapTem'
 
 		retval = []
-		for release in releases:
-			chp_title, reldatestr = release.find_all("span")
-			rel = datetime.datetime.strptime(reldatestr.get_text(), '%d/%m/%y')
-			if rel.date() == datetime.date.today():
+
+		chapters = soup.find("ul", class_='fanfic_chapter_list')
+		volumes = chapters.find_all('li', class_='fanfic_volume')
+		for volume in volumes:
+			releases = volume.find_all('li', class_='fanfic_chapter')
+			for release in releases:
+				chp_title = release.find("a")
+
+				vol_str = volume.find('div', class_='fanfic_volume_title').get_text()
 				reldate = time.time()
-			else:
-				reldate = calendar.timegm(rel.timetuple())
 
-			chp_title = chp_title.get_text()
-			# print("Chp title: '{}'".format(chp_title))
-			vol, chp, frag, post = extractTitle(chp_title)
+				chp_title = chp_title.get_text()
 
-			raw_item = {}
-			raw_item['srcname']   = "RoyalRoadL"
-			raw_item['published'] = reldate
-			raw_item['linkUrl']   = release.a['href']
+				agg_title = " ".join((vol_str, chp_title))
+				# print("Chp title: '{}'".format(chp_title))
+				vol, chp, frag, post = extractTitle(agg_title)
+				raw_item = {}
+				raw_item['srcname']   = "JapTem"
+				raw_item['published'] = reldate
+				releaseurl = urllib.parse.urljoin(seriesPageUrl, release.a['href'])
+				raw_item['linkUrl']   = releaseurl
 
-			msg = msgpackers.buildReleaseMessage(raw_item, title, vol, chp, frag, author=author, postfix=chp_title, tl_type='oel', extraData=extra)
-			retval.append(msg)
+				msg = msgpackers.buildReleaseMessage(raw_item, title, vol, chp, frag, author=author, postfix=chp_title, tl_type='oel', extraData=extra)
+				msg = msgpackers.createReleasePacket(msg)
 
+				retval.append(msg)
 		if not retval:
 			return []
-		self.amqp_put_item(pkt)
+
+		retval.append(meta_pkt)
+		# return []
 		return retval
 
 
 
 
 	def sendReleases(self, releases):
-		self.log.info("Total releases found on page: %s. Emitting messages into AMQP local queue.", len(releases))
-		for release in releases:
-			pkt = msgpackers.createReleasePacket(release)
+		self.log.info("Total releases found on page: %s", len(releases))
+		for pkt in releases:
 			self.amqp_put_item(pkt)
 
 
 
 
-	def processPage(self, url, content):
+	def processPage(self, content):
 
 		soup = bs4.BeautifulSoup(self.content)
-		releases = self.extractSeriesReleases(self.pageUrl, soup)
-		if releases:
-			self.sendReleases(releases)
+
+		for chunk in soup.find_all('li', class_='fanfic_title'):
+			releases = self.extractSeriesReleases(self.pageUrl, chunk)
+
+			if releases:
+				self.sendReleases(releases)
 
 
 
@@ -189,7 +217,7 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 		# print("Call to extract!")
 		# print(self.amqpint)
 
-		self.processPage(self.pageUrl, self.content)
+		self.processPage(self.content)
 
 
 def testJobFromUrl(url):
@@ -214,30 +242,26 @@ def test():
 	import logSetup
 	import WebMirror.rules
 	import WebMirror.Engine
-	import WebMirror.Runner
 	import multiprocessing
 	logSetup.initLogging()
 
-	crawler = WebMirror.Runner.Crawler()
-	crawler.start_aggregator()
-
-
 	c_lok = cookie_lock = multiprocessing.Lock()
-	engine = WebMirror.Engine.SiteArchiver(cookie_lock=c_lok, response_queue=crawler.agg_queue)
+	engine = WebMirror.Engine.SiteArchiver(cookie_lock=c_lok)
+	engine.dispatchRequest(testJobFromUrl('http://japtem.com/fanfic.php'))
 
 
+	# import WebMirror.util.webFunctions as webfunc
 
-	engine.dispatchRequest(testJobFromUrl('http://royalroadl.com/fiction/3333'))
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fiction/2850'))
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fictions/latest-updates/'))
+	# wg = webfunc.WebGetRobust()
+	# proc = JapTemSeriesPageProcessor(pageUrl="urlllllll", pgContent="watttt", type='lolertype', dosuper=False)
 
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fictions/best-rated/'))
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fictions/latest-updates/'))
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fictions/active-top-50/'))
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fictions/weekly-views-top-50/'))
-	# engine.dispatchRequest(testJobFromUrl('http://www.royalroadl.com/fictions/newest/'))
-
-	crawler.join_aggregator()
+	# urls = [
+	# 	'http://japtem.com/fanfic.php',
+	# 	]
+	# for url in urls:
+	# 	ctnt = wg.getpage(url)
+	# 	proc.content = ctnt
+	# 	proc.processPage(ctnt)
 
 if __name__ == "__main__":
 	test()

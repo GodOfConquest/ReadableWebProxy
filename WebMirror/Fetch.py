@@ -45,9 +45,11 @@ class ItemFetcher(LogBase.LoggerMixin):
 	# The db defaults to  (e.g. max signed integer value) anyways
 	FETCH_DISTANCE = 1000 * 1000
 
-	def __init__(self, rules, target_url, start_url, cookie_lock=None, wg_handle=None):
+	def __init__(self, rules, target_url, start_url, cookie_lock=None, wg_handle=None, response_queue=None):
 		# print("Fetcher init()")
 		super().__init__()
+
+		self.response_queue = response_queue
 
 		if wg_handle:
 			self.wg = wg_handle
@@ -96,7 +98,7 @@ class ItemFetcher(LogBase.LoggerMixin):
 				self.rules = ruleset
 
 		if not self.rules:
-			self.log.warn("Using base ruleset!")
+			self.log.warn("Using base ruleset for URL: '%s'!", target_url)
 			self.rules = baseRules
 
 
@@ -157,6 +159,7 @@ class ItemFetcher(LogBase.LoggerMixin):
 									'destyle'         : self.rules['destyle'],
 									'preserveAttrs'   : self.rules['preserveAttrs'],
 									'type'            : self.rules['type'],
+									'message_q'       : self.response_queue,
 		}
 
 		ret = plugin.process(params)
@@ -164,6 +167,7 @@ class ItemFetcher(LogBase.LoggerMixin):
 		if no_ret:
 			return
 
+		assert ret != None, "Return from %s was None!" % plugin
 		assert "mimeType" in ret or "file" in ret, "Neither mimetype or file in ret for url '%s', plugin '%s'" % (url, plugin)
 
 		return ret
@@ -231,7 +235,7 @@ class ItemFetcher(LogBase.LoggerMixin):
 				if mimeType.lower() in plugin.wanted_mimetypes and \
 						plugin.wantsUrl(self.target_url)       and \
 						plugin.wantsFromContent(content):
-					print("plugin", plugin, "wants", self.target_url)
+					# print("plugin", plugin, "wants", self.target_url)
 					ret = self.plugin_dispatch(plugin, self.target_url, content, fName, mimeType)
 					if not "file" in ret:
 						ret['rawcontent'] = content

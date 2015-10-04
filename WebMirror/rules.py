@@ -193,6 +193,16 @@ def getCloudflare(ruleset):
 		return False
 	return ruleset['cloudflare']
 
+def getTrigger(ruleset):
+	if not 'trigger' in ruleset:
+		return True
+	return ruleset['trigger']
+
+def getRefetch(ruleset):
+	if not 'refetch' in ruleset:
+		return True
+	return ruleset['refetch']
+
 def getIgnoreMalformed(ruleset):
 	if not 'IGNORE_MALFORMED_URLS' in ruleset:
 		return False
@@ -236,12 +246,14 @@ def validateRuleKeys(dat, fname):
 		'preserveAttrs',
 		'type',
 		'extraStartUrls',
+		'trigger',
+
+		'refetch',
 
 		# Not currently implemented, but useful
 		'titleTweakLut',
 		]
 	for key in keys:
-
 		assert key in valid, "Key '%s' from ruleset '%s' is not valid!" % (key, fname)
 
 
@@ -269,6 +281,11 @@ def load_validate_rules(fname, dat):
 	rules['destyle']               = getDestyles(dat)
 	rules['preserveAttrs']         = getPreserveAttrs(dat)
 
+	rules['trigger']               = getTrigger(dat)
+	if not rules['trigger']:
+		rules['starturls']             = []
+
+	rules['refetch']               = getRefetch(dat)
 
 	return rules
 
@@ -314,6 +331,7 @@ def get_rules():
 
 	# for ruleset in ret:
 	# 	print(type(ruleset['starturls']))
+
 	assert [True for ruleset in ret if 'starturls' in ruleset and ruleset['starturls'] == None], "You must have a base ruleset for matching generic sites (with a baseurl value of `None`)"
 
 	print("Loaded rulesets ({}):".format(len(ret)))

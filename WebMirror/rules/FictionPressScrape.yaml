@@ -10,6 +10,8 @@ baseUrl: [
 	"http://www.fictionpress.com/",
 	]
 
+trigger: False
+
 badwords: [
 			"/about/",
 			"/join-us/",
@@ -28,6 +30,12 @@ badwords: [
 			"/post.php?",
 			"/author.php?",
 			"fictionpress.com/atom/u/",
+			".myspacecdn.com",
+			"static.flickr.com",
+			"/http/",
+
+			# Block user pages (they're HUGE)
+			'fictionpress.com/u/',
 			]
 
 # Content Stripping needs to be determined.

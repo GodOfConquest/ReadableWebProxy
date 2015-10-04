@@ -21,8 +21,8 @@ import WebMirror.TimedTriggers.TimeoutTrigger
 import WebMirror.TimedTriggers.PageTriggers
 
 scrapePlugins = {
-	0  : (WebMirror.TimedTriggers.RssTrigger.RssTriggerBase,                   minutes(20)),
-	1  : (WebMirror.TimedTriggers.TimeoutTrigger.TimeoutTriggerBase,           minutes(20)),
+	0  : (WebMirror.TimedTriggers.RssTrigger.RssTriggerBase,                   minutes(30)),
+	# 1  : (WebMirror.TimedTriggers.TimeoutTrigger.TimeoutTriggerBase,           minutes(31)),
 	2  : (WebMirror.TimedTriggers.PageTriggers.HourlyPageTrigger,              minutes(60)),
 	3  : (WebMirror.TimedTriggers.PageTriggers.EveryOtherDayPageTrigger,       days(2)),
 
@@ -51,9 +51,15 @@ PLUGINS = [
 
 
 import WebMirror.OutputFilters.RoyalRoadL.RRLSeriesPageFilter
+import WebMirror.OutputFilters.RoyalRoadL.RRLSeriesUpdateFilter
 import WebMirror.OutputFilters.WattPad.WattPadSeriesPageFilter
+import WebMirror.OutputFilters.JapTem.JapTemSeriesPageFilter
 
 FILTERS = [
 	WebMirror.OutputFilters.RoyalRoadL.RRLSeriesPageFilter.RRLSeriesPageProcessor,
-	WebMirror.OutputFilters.WattPad.WattPadSeriesPageFilter.WattPadSeriesPageFilter,
+	WebMirror.OutputFilters.RoyalRoadL.RRLSeriesUpdateFilter.RRLSeriesUpdateFilter,
+	WebMirror.OutputFilters.JapTem.JapTemSeriesPageFilter.JapTemSeriesPageProcessor,
+	# WebMirror.OutputFilters.WattPad.WattPadSeriesPageFilter.WattPadSeriesPageFilter,
 ]
+
+print("Processing plugins: %s, active filters: %s, trigger plugins: %s" % (len(PLUGINS), len(FILTERS), len(scrapePlugins)))

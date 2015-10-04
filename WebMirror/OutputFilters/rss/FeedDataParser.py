@@ -17,7 +17,8 @@ from WebMirror.OutputFilters.util.TitleParsers import extractVolChapterFragmentP
 from WebMirror.OutputFilters.util.TitleParsers import extractChapterVolFragment
 
 # pylint: disable=W0201
-
+import WebMirror.OutputFilters.FilterBase
+import flags
 
 skip_filter = [
 	"www.baka-tsuki.org",
@@ -26,31 +27,16 @@ skip_filter = [
 
 
 
-class DataParser():
+class DataParser(WebMirror.OutputFilters.FilterBase.FilterBase):
 
 	amqpint = None
 	amqp_connect = True
 
-	def __init__(self, transfer=True, debug_print=False):
-		super().__init__()
+	def __init__(self, transfer=True, debug_print=False, **kwargs):
+		super().__init__(**kwargs)
 
 		self.dbg_print = debug_print
-
 		self.transfer = transfer
-
-		amqp_settings = {}
-		amqp_settings["RABBIT_CLIENT_NAME"] = settings.RABBIT_CLIENT_NAME
-		amqp_settings["RABBIT_LOGIN"]       = settings.RABBIT_LOGIN
-		amqp_settings["RABBIT_PASWD"]       = settings.RABBIT_PASWD
-		amqp_settings["RABBIT_SRVER"]       = settings.RABBIT_SRVER
-		amqp_settings["RABBIT_VHOST"]       = settings.RABBIT_VHOST
-
-
-		print("Transfer state:", self.amqp_connect)
-		if self.amqp_connect:
-			self.amqpint = AmqpInterface.RabbitQueueHandler(settings=amqp_settings)
-		else:
-			print("Not making rabbit connection.")
 		self.names = set()
 
 	####################################################################################################################################################
@@ -1630,6 +1616,67 @@ class DataParser():
 	####################################################################################################################################################
 	####################################################################################################################################################
 	##
+	##  OEL Bits!
+	##
+	####################################################################################################################################################
+	####################################################################################################################################################
+
+
+	####################################################################################################################################################
+	# DragomirCM
+	####################################################################################################################################################
+	def extractDragomirCM(self, item):
+		vol, chp, frag, postfix = extractVolChapterFragmentPostfix(item['title'])
+		if not postfix and ":" in item['title']:
+			postfix = item['title'].split(":")[-1]
+		if 'Magic Academy' in item['tags'] and chp or vol:
+			return buildReleaseMessage(item, 'I was reincarnated as a Magic Academy!', vol, chp, frag=frag, postfix=postfix, tl_type='oel')
+		if "100 Luck" in item['tags'] and chp or vol:
+			return buildReleaseMessage(item, '100 Luck and the Dragon Tamer Skill!', vol, chp, frag=frag, postfix=postfix, tl_type='oel')
+
+
+		return False
+	####################################################################################################################################################
+	# Mike777ac
+	####################################################################################################################################################
+	def extractMike777ac(self, item):
+		vol, chp, frag, postfix = extractVolChapterFragmentPostfix(item['title'])
+
+		if not postfix and ":" in item['title']:
+			postfix = item['title'].split(":")[-1]
+
+		# Christ, this guy doesn't seem to get how tags work:
+		# - 'Action'
+		# - 'Adventure'
+		# - 'Comedy'
+		# - 'Fantasy'
+		# - 'Hardcore OP-ness'
+		# - 'Hardcore OPness'
+		# - 'Magic'
+		# - 'Mature'
+		# - 'HCOP'
+		# - 'MC'
+		# - 'Transportation'
+		# - 'Dungeon'
+		#
+		# This shit isn't used for indexing or crap. Why do you have so many useless synonyms and tags that are literally
+		# applied to EVERY item?
+
+		if 'Hardcore OPness' in item['tags'] and chp or vol:
+			return buildReleaseMessage(item, 'Hardcore OP-ness', vol, chp, frag=frag, postfix=postfix, tl_type='oel')
+
+		print()
+		print(item['title'])
+		print(item['tags'])
+		print(vol, chp, frag, postfix)
+
+		return False
+
+
+
+	####################################################################################################################################################
+	####################################################################################################################################################
+	##
 	##  Dispatcher
 	##
 	####################################################################################################################################################
@@ -1935,6 +1982,13 @@ class DataParser():
 
 
 
+		elif item['srcname'] == 'DragomirCM':
+			ret = self.extractDragomirCM(item)
+
+		elif item['srcname'] == 'Mike777ac':
+			ret = self.extractMike777ac(item)
+
+
 
 		# if ret:
 		# 	print(item['title'])
@@ -1968,7 +2022,31 @@ class DataParser():
 
 		# ret = False
 
-		if self.dbg_print:
+		if flags.RSS_DEBUG and not ret:
+			vol, chp, frag, postfix = extractVolChapterFragmentPostfix(item['title'])
+			if vol or chp or frag:
+				with open('rss_filter_misses.txt', "a") as fp:
+					# fp.write("\n==============================\n")
+
+					write_items = [
+						("Title:      ", item['title']),
+						("Vol:        ", vol),
+						("Chp:        ", chp),
+						("Frag:       ", frag),
+						("Postfix:    ", postfix),
+						("SourceName: ", item['srcname']),
+						("Tags:       ", item['tags']),
+						("Feed URL:   ", item['linkUrl']),
+						("GUID:       ", item['guid']),
+					]
+
+					for name, val in write_items:
+						fp.write("%s '%s', " % (name, val))
+					fp.write("\n")
+					# fp.write("Feed URL: '%s', guid: '%s'" % (item['linkUrl'], item['guid']))
+					# fp.write("'%s', '%s', '%s', '%s', '%s', '%s', '%s'\n" % (item['srcname'], item['title'], item['tags'], vol, chp, frag, postfix))
+
+		if self.dbg_print or flags.RSS_DEBUG:
 			if not ret:
 				vol, chp, frag, postfix = extractVolChapterFragmentPostfix(item['title'])
 				print("'%s', '%s', '%s', '%s', '%s', '%s', '%s'" % (item['srcname'], item['title'], item['tags'], vol, chp, frag, postfix))
@@ -2056,7 +2134,7 @@ class DataParser():
 
 		raw = self.getRawFeedMessage(feedDat)
 		if raw and tx_raw:
-			self.amqpint.put_item(raw)
+			self.amqp_put_item(raw)
 
 		debug = False
 		if not tx_parse:
@@ -2064,7 +2142,7 @@ class DataParser():
 
 		new = self.getProcessedReleaseInfo(feedDat, debug)
 		if new and tx_parse:
-			self.amqpint.put_item(new)
+			self.amqp_put_item(new)
 
 
 

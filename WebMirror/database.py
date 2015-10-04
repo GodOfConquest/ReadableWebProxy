@@ -1,11 +1,13 @@
 
 import os
 import multiprocessing
+import threading
 
 DB_REALTIME_PRIORITY =    1 * 1000
 DB_HIGH_PRIORITY     =   10 * 1000
 DB_MED_PRIORITY      =   50 * 1000
 DB_LOW_PRIORITY      =  100 * 1000
+DB_IDLE_PRIORITY     =  500 * 1000
 
 DB_DEFAULT_DIST      =   10 * 1000
 
@@ -40,6 +42,7 @@ import citext
 import datetime
 from sqlalchemy.dialects.postgresql import ENUM
 from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import TSVECTOR
 ischema_names['citext'] = citext.CIText
 
 from settings import DATABASE_IP            as C_DATABASE_IP
@@ -53,24 +56,53 @@ SQLALCHEMY_DATABASE_URI = 'postgresql://{user}:{passwd}@{host}:5432/{database}'.
 SESSIONS = {}
 ENGINES = {}
 
+ENGINE_LOCK = multiprocessing.Lock()
+SESSION_LOCK = multiprocessing.Lock()
+
 def get_engine():
 	cpid = multiprocessing.current_process().name
-	if not cpid in SESSIONS:
-		ENGINES[cpid] = create_engine(SQLALCHEMY_DATABASE_URI,
-					isolation_level="REPEATABLE READ")
+	ctid = threading.current_thread().name
+	csid = "{}-{}".format(cpid, ctid)
+	if not csid in ENGINES:
+		with ENGINE_LOCK:
+			# Check if the engine was created while we were
+			# waiting on the lock.
+			if csid in ENGINES:
+				return ENGINES[csid]
 
-	return ENGINES[cpid]
+			print("Instantiating DB Engine")
+			ENGINES[csid] = create_engine(SQLALCHEMY_DATABASE_URI) #,
+						# isolation_level="REPEATABLE READ")
+
+	return ENGINES[csid]
 
 def get_session():
 	cpid = multiprocessing.current_process().name
-	if not cpid in SESSIONS:
-		engine = create_engine(SQLALCHEMY_DATABASE_URI,
-					isolation_level="REPEATABLE READ")
+	ctid = threading.current_thread().name
+	csid = "{}-{}".format(cpid, ctid)
+	if not csid in SESSIONS:
+		with SESSION_LOCK:
+			# check if the session was created while
+			# we were waiting for the lock
+			if csid in SESSIONS:
+				return SESSIONS[csid]
+			SESSIONS[csid] = scoped_session(sessionmaker(bind=get_engine(), autoflush=False, autocommit=False))()
+			print("Creating database interface:", SESSIONS[csid])
 
-		SESSIONS[cpid] = scoped_session(sessionmaker(bind=get_engine(), autoflush=False, autocommit=False))()
-		print("Creating database interface:", SESSIONS[cpid])
+	return SESSIONS[csid]
 
-	return SESSIONS[cpid]
+def delete_session():
+	cpid = multiprocessing.current_process().name
+	ctid = threading.current_thread().name
+	csid = "{}-{}".format(cpid, ctid)
+	if csid in SESSIONS:
+		with SESSION_LOCK:
+			# check if the session was created while
+			# we were waiting for the lock
+			if not csid in SESSIONS:
+				return SESSIONS[csid]
+			del SESSIONS[csid]
+			print("Deleted session for id: ", csid)
 
 
 # import traceback
@@ -84,34 +116,41 @@ itemtype_enum  = ENUM('western', 'eastern', 'unknown',            name='itemtype
 
 class WebPages(Base):
 	__tablename__ = 'web_pages'
-	id           = Column(Integer, primary_key = True)
-	state        = Column(dlstate_enum, default='new', index=True, nullable=False)
-	errno        = Column(Integer, default='0')
-	url          = Column(Text, nullable = False, index = True, unique = True)
-	starturl     = Column(Text, nullable = False)
-	netloc       = Column(Text, nullable = False)
+	id                = Column(Integer, primary_key = True)
+	state             = Column(dlstate_enum, default='new', index=True, nullable=False)
+	errno             = Column(Integer, default='0')
+	url               = Column(Text, nullable = False, index = True, unique = True)
+	starturl          = Column(Text, nullable = False)
+	netloc            = Column(Text, nullable = False)
 
 	# Foreign key to the files table if needed.
-	file         = Column(Integer, ForeignKey('web_files.id'))
+	file              = Column(Integer, ForeignKey('web_files.id'))
 
-	priority     = Column(Integer, default=1000000, index=True, nullable=False)
-	distance     = Column(Integer, index=True, nullable=False)
+	priority          = Column(Integer, default=1000000, index=True, nullable=False)
+	distance          = Column(Integer, index=True, nullable=False)
 
-	is_text      = Column(Boolean, default=False)
-	limit_netloc = Column(Boolean, default=True)
+	is_text           = Column(Boolean, default=False)
+	limit_netloc      = Column(Boolean, default=True)
 
-	title       = Column(citext.CIText)
-	mimetype    = Column(Text)
-	type        = Column(itemtype_enum, default='unknown', index=True)
+	title             = Column(citext.CIText)
+	mimetype          = Column(Text)
+	type              = Column(itemtype_enum, default='unknown', index=True)
 
-	raw_content = Column(Text)
-	content     = Column(Text)
+	raw_content       = Column(Text)
+	content           = Column(Text)
 
-	fetchtime   = Column(DateTime, default=datetime.datetime.min)
-	addtime     = Column(DateTime, default=datetime.datetime.utcnow)
+	fetchtime         = Column(DateTime, default=datetime.datetime.min)
+	addtime           = Column(DateTime, default=datetime.datetime.utcnow)
+
+	# Items with `normal_fetch_mode` set to false are not retreived by the normal scheduling system
+	# in WebMirror\Engine.py. This is to allow external systems that need to manage their own
+	# fetch scheduling to operate within the same database.
+	normal_fetch_mode = Column(Boolean, default=True)
+
+	tsv_content       = Column(TSVECTOR)
 
 
-	file_item   = relationship("WebFiles")
+	file_item         = relationship("WebFiles")
 
 # File table doesn't know anything about URLs, since they're kept in the
 # WebPages table entirely.
@@ -214,6 +253,23 @@ class FeedItems(Base):
 	author        = association_proxy('author_rel',   'author',    creator=author_creator)
 
 
+# Tools for tracking plugins
+class PluginStatus(Base):
+	__tablename__ = 'plugin_status'
+	id             = Column(Integer, primary_key = True)
+
+	plugin_name    = Column(Text)
+
+	is_running     = Column(Boolean, default=False)
+
+	last_run       = Column(DateTime)
+	last_run_end   = Column(DateTime)
+
+	last_error     = Column(DateTime)
+	last_error_msg = Column(Text)
+
+
+
 Base.metadata.create_all(bind=get_engine(), checkfirst=True)
 
 
@@ -222,6 +278,9 @@ Base.metadata.create_all(bind=get_engine(), checkfirst=True)
 #
 # CREATE INDEX idx_web_pages_title ON web_pages USING gin(to_tsvector('english', title));
 # CREATE INDEX idx_web_pages_content ON web_pages USING gin(to_tsvector('english', content));
+#
+# Essential for fast task get queries
+# CREATE INDEX ix_web_pages_distance_filtered ON web_pages (priority ASC NULLS LAST) WHERE web_pages.state = 'new'::dlstate_enum AND web_pages.distance < 1000000;
 #
 
 

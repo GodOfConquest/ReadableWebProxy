@@ -15,6 +15,10 @@ import sqlalchemy.exc
 
 from sqlalchemy import desc
 
+from sqlalchemy.sql import text
+from sqlalchemy import distinct
+from sqlalchemy.dialects import postgresql
+
 import WebMirror.util.urlFuncs
 import urllib.parse
 import traceback
@@ -37,7 +41,7 @@ if "debug" in sys.argv:
 	# RSC_CACHE_DURATION = 60 * 60 * 5
 else:
 	CACHE_DURATION = 60 * 60 * 24 * 7
-	RSC_CACHE_DURATION = 60 * 60 * 24 * 14
+	RSC_CACHE_DURATION = 60 * 60 * 24 * 147
 
 
 
@@ -160,13 +164,14 @@ class SiteArchiver(LogBase.LoggerMixin):
 	# The db defaults to  (e.g. max signed integer value) anyways
 	FETCH_DISTANCE = 1000 * 1000
 
-	def __init__(self, cookie_lock, run_filters=True):
+	def __init__(self, cookie_lock, run_filters=True, response_queue=None):
 		print("SiteArchiver __init__()")
 		super().__init__()
 
 		self.db = db
 
 		self.cookie_lock = cookie_lock
+		self.resp_q = response_queue
 
 		# print("SiteArchiver database imported")
 		ruleset = WebMirror.rules.load_rules()
@@ -217,7 +222,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 	# Minimal proxy because I want to be able to call the fetcher without affecting the DB.
 	def fetch(self, job):
-		fetcher = self.fetcher(self.ruleset, job.url, job.starturl, self.cookie_lock, wg_handle=self.wg)
+		fetcher = self.fetcher(self.ruleset, job.url, job.starturl, self.cookie_lock, wg_handle=self.wg, response_queue=self.resp_q)
 		response = fetcher.fetch()
 		return response
 
@@ -397,49 +402,75 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 		self.log.info("Page had %s unfiltered content links, %s unfiltered resource links.", len(plain), len(resource))
 
-		while 1:
-			try:
-				for link, istext in items:
-					start = urllib.parse.urlsplit(link).netloc
+		if self.resp_q != None:
+			for link, istext in items:
+				start = urllib.parse.urlsplit(link).netloc
 
-					assert link.startswith("http")
-					assert start
+				assert link.startswith("http")
+				assert start
+				new = {
+					'url'       : link,
+					'starturl'  : job.starturl,
+					'netloc'    : start,
+					'distance'  : job.distance+1,
+					'is_text'   : istext,
+					'priority'  : job.priority,
+					'type'      : job.type,
+					'state'     : "new",
+					'fetchtime' : datetime.datetime.now(),
+					}
+				self.resp_q.put(("new_link", new))
 
-					new = {
-						'url'       : link,
-						'starturl'  : job.starturl,
-						'netloc'    : start,
-						'distance'  : job.distance+1,
-						'is_text'   : istext,
-						'priority'  : job.priority,
-						'type'      : job.type,
-						'state'     : "new",
-						'fetchtime' : datetime.datetime.now(),
-						}
+				while self.resp_q.qsize() > 1000:
+					time.sleep(0.1)
 
-					# Fucking huzzah for ON CONFLICT!
-					cmd = text("""
-							INSERT INTO
-								web_pages
-								(url, starturl, netloc, distance, is_text, priority, type, fetchtime, state)
-							VALUES
-								(:url, :starturl, :netloc, :distance, :is_text, :priority, :type, :fetchtime, :state)
-							ON CONFLICT DO NOTHING
-							""")
-					self.db.get_session().execute(cmd, params=new)
-
-				self.db.get_session().commit()
-				break
-			except sqlalchemy.exc.InternalError:
-				self.log.info("Transaction error. Retrying.")
-				self.db.get_session().rollback()
-			except sqlalchemy.exc.OperationalError:
-				self.log.info("Transaction error. Retrying.")
-				self.db.get_session().rollback()
-
-		self.log.info("Links upserted.")
+			self.log.info("Links upserted. Items in processing queue: %s", self.resp_q.qsize())
 
 
+		else:
+
+			while 1:
+				try:
+					for link, istext in items:
+						start = urllib.parse.urlsplit(link).netloc
+
+						assert link.startswith("http")
+						assert start
+
+						new = {
+							'url'       : link,
+							'starturl'  : job.starturl,
+							'netloc'    : start,
+							'distance'  : job.distance+1,
+							'is_text'   : istext,
+							'priority'  : job.priority,
+							'type'      : job.type,
+							'state'     : "new",
+							'fetchtime' : datetime.datetime.now(),
+							}
+
+						#  Fucking huzzah for ON CONFLICT!
+						cmd = text("""
+								INSERT INTO
+									web_pages
+									(url, starturl, netloc, distance, is_text, priority, type, fetchtime, state)
+								VALUES
+									(:url, :starturl, :netloc, :distance, :is_text, :priority, :type, :fetchtime, :state)
+								ON CONFLICT DO NOTHING
+								""")
+						self.db.get_session().execute(cmd, params=new)
+
+					self.db.get_session().commit()
+					break
+				except sqlalchemy.exc.InternalError:
+					self.log.info("SQLAlchemy InternalError - Retrying.")
+					self.db.get_session().rollback()
+				except sqlalchemy.exc.OperationalError:
+					self.log.info("SQLAlchemy OperationalError - Retrying.")
+					self.db.get_session().rollback()
+				except sqlalchemy.exc.InvalidRequestError:
+					self.log.info("SQLAlchemy InvalidRequestError - Retrying.")
+					self.db.get_session().rollback()
 
 	def upsertFileResponse(self, job, response):
 		# Response dict structure:
@@ -524,24 +555,63 @@ class SiteArchiver(LogBase.LoggerMixin):
 		# or we succeed.
 		while 1:
 			try:
-				subq = self.db.get_session().query(func.min(self.db.WebPages.priority)) \
-					.filter(self.db.WebPages.state == "new")                            \
-					.filter(self.db.WebPages.distance < (self.db.MAX_DISTANCE))
+				# Hand-tuned query, I couldn't figure out how to
+				# get sqlalchemy to emit /exactly/ what I wanted.
+				# TINY changes will break the query optimizer, and
+				# the 100 ms query will suddenly take 10 seconds!
+				raw_query = text('''
+						SELECT
+						    web_pages.id
+						FROM
+						    web_pages
+						WHERE
+						    web_pages.state = 'new'
+						AND
+						    normal_fetch_mode = true
+						AND
+						    web_pages.priority = (
+						       SELECT
+						            min(priority)
+						        FROM
+						            web_pages
+						        WHERE
+						            state = 'new'::dlstate_enum
+						        AND
+						            distance < 1000000
+						        AND
+						            normal_fetch_mode = true
+						    )
+						AND
+						    web_pages.distance < 1000000
+						LIMIT 1;
+					''')
 
-				query = self.db.get_session().query(self.db.WebPages)           \
-					.filter(self.db.WebPages.state == "new")                    \
-					.filter(self.db.WebPages.priority == subq)                  \
-					.filter(self.db.WebPages.distance < (self.db.MAX_DISTANCE)) \
-					.limit(1)
 
-					# This compound order_by completely, COMPLETELY tanked the
-					# time of this query. As it was, it took > 2 seconds per query!
-					# .order_by(desc(self.db.WebPages.is_text))           \
-					# .order_by(desc(self.db.WebPages.addtime))           \
-					# .order_by(self.db.WebPages.distance)                \
-					# .order_by(self.db.WebPages.url)                     \
+				start = time.time()
+				rid = self.db.get_session().execute(raw_query).scalar()
+				xqtim = time.time() - start
 
-				job = query.scalar()
+				if not rid:
+					self.db.get_session().flush()
+					self.db.get_session().commit()
+					return False
+
+				# print("Raw ID From manual query:")
+				# print(rid)
+				# print()
+				self.log.info("Query execution time: %s ms", xqtim * 1000)
+
+
+				job = self.db.get_session().query(self.db.WebPages) \
+					.filter(self.db.WebPages.id == rid)             \
+					.one()
+
+				if job.state != 'new':
+					self.db.get_session().flush()
+					self.db.get_session().commit()
+					self.log.info("Someone else fetched that job first!")
+					continue
+
 				if not job:
 					self.db.get_session().flush()
 					self.db.get_session().commit()
