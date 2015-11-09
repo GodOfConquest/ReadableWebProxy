@@ -1,9 +1,18 @@
 #TODO:
-
  - Figure out how to selectively preserve some classes (I want to allow fontawesome content)
-add last updated field for most recemt release
+ - Search for proximate words.
+ - "https://xxjohnsmithxx.wordpress.com", parser
+ 
+handle leading decimals numeric
+
+delete series
+
 
  FIXED:
+## wattpad requires login for some things?
+ ## - Show two digits for all fragment numbers.
+ ## - Add last updated field for most recent release
+ ## - Removing items does not work.
  ## - WattPad metadata filter.
  ## - Rule-caching is not working.
  ## - Multithreaded server fails because DB interface is shared across threads.

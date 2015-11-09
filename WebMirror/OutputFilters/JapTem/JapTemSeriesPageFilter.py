@@ -16,6 +16,7 @@ import datetime
 import time
 import urllib.parse
 import json
+import traceback
 
 MIN_RATING = 2.5
 
@@ -91,14 +92,13 @@ class JapTemSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 			ratingtg = ratingtg.pop()
 
 
-		if "no rating" in ratingtg.lower():
-			return []
-
 		rating, views, chapters = ratingtg.split("·")
-		rating_score = float(rating.split()[-1])
 
-		if not rating_score >= MIN_RATING:
-			return []
+		# I think the japtem rating system is just plain out broken.
+		if not "no rating" in ratingtg.lower():
+			rating_score = float(rating.split()[-1])
+			if not rating_score >= MIN_RATING:
+				return []
 
 
 		chapter_num = float(chapters.split()[0])
@@ -199,10 +199,14 @@ class JapTemSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 		soup = bs4.BeautifulSoup(self.content)
 
 		for chunk in soup.find_all('li', class_='fanfic_title'):
-			releases = self.extractSeriesReleases(self.pageUrl, chunk)
+			try:
+				releases = self.extractSeriesReleases(self.pageUrl, chunk)
 
-			if releases:
-				self.sendReleases(releases)
+				if releases:
+					self.sendReleases(releases)
+			except Exception:
+				traceback.print_exc()
+
 
 
 

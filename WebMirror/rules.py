@@ -199,9 +199,9 @@ def getTrigger(ruleset):
 	return ruleset['trigger']
 
 def getRefetch(ruleset):
-	if not 'refetch' in ruleset:
+	if not 'normal_fetch_mode' in ruleset:
 		return True
-	return ruleset['refetch']
+	return ruleset['normal_fetch_mode']
 
 def getIgnoreMalformed(ruleset):
 	if not 'IGNORE_MALFORMED_URLS' in ruleset:
@@ -212,6 +212,14 @@ def getGenreType(ruleset):
 	assert 'type' in ruleset, "Type missing from ruleset!"
 	assert ruleset['type'] in ['western', 'eastern', 'unknown']
 	return ruleset['type']
+
+def getSpecialFilters(ruleset):
+	ret = {}
+	if "special_case_filters" in ruleset:
+		for netloc, params in ruleset['special_case_filters'].items():
+			ret[netloc] = params
+	return ret
+
 
 
 def checkBadValues(ruleset):
@@ -248,7 +256,8 @@ def validateRuleKeys(dat, fname):
 		'extraStartUrls',
 		'trigger',
 
-		'refetch',
+		'normal_fetch_mode',
+		'special_case_filters',
 
 		# Not currently implemented, but useful
 		'titleTweakLut',
@@ -285,9 +294,11 @@ def load_validate_rules(fname, dat):
 	if not rules['trigger']:
 		rules['starturls']             = []
 
-	rules['refetch']               = getRefetch(dat)
+	rules['normal_fetch_mode']               = getRefetch(dat)
 
-	return rules
+	special = getSpecialFilters(dat)
+
+	return rules, special
 
 def get_rules():
 	cwd = os.path.split(__file__)[0]
@@ -296,6 +307,7 @@ def get_rules():
 	items = os.listdir(rulepath)
 	items.sort()
 	ret = []
+	specials = {}
 	for item in [os.path.join(rulepath, item) for item in items if item.endswith('.yaml')]:
 
 		with open(item, "r") as fp:
@@ -306,9 +318,13 @@ def get_rules():
 				# YAML causes the whole file to load wrong.
 				text = text.replace("	", "    ")
 				dat = yaml.load(text)
-				rules = load_validate_rules(item, dat)
+				rules, special = load_validate_rules(item, dat)
 				if rules:
 					ret.append(rules)
+
+				if special:
+					for key, val in special.items():
+						specials[key] = val
 
 				# print(item)
 				assert 'starturls' in rules
@@ -340,7 +356,7 @@ def get_rules():
 	# for ruleset in ret:
 	# 	print(ruleset)
 	# 	print()
-	return ret
+	return ret, specials
 
 
 
@@ -348,12 +364,37 @@ def load_rules():
 
 	if flags.RULE_CACHE == None or "debug" in sys.argv:
 		print("Need to load rules (%s, %s)" % (flags.RULE_CACHE == None, "debug" in sys.argv))
-		rules = get_rules()
+		rules, specials = get_rules()
+
+		# Might as well update both while we're here.
 		flags.RULE_CACHE = rules
+		flags.SPECIAL_CASE_CACHE = specials
 	else:
 		print("Using cached rules")
 		rules = flags.RULE_CACHE
 	return rules
 
+
+
+def load_special_case_sites():
+
+	if flags.SPECIAL_CASE_CACHE == None or "debug" in sys.argv:
+		print("Need to load special-url handling ruleset (%s, %s)" % (flags.SPECIAL_CASE_CACHE == None, "debug" in sys.argv))
+		rules, specials = get_rules()
+
+		# Might as well update both while we're here.
+		flags.RULE_CACHE = rules
+		flags.SPECIAL_CASE_CACHE = specials
+	else:
+		print("Using cached special-handling command set")
+		specials = flags.SPECIAL_CASE_CACHE
+	return specials
+
+
+
 # Trigger cache-loading of the ruleset.
 load_rules()
+load_special_case_sites()
+
+if __name__ == "__main__":
+	print(load_special_case_sites())

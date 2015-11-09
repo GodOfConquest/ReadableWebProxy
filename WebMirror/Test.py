@@ -7,6 +7,8 @@ if __name__ == "__main__":
 import WebMirror.database as db
 import datetime
 from WebMirror.Engine import SiteArchiver
+
+from sqlalchemy.sql import text
 import urllib.parse
 import urllib.error
 import WebMirror.rules
@@ -56,7 +58,7 @@ def test(url, debug=True):
 	if debug:
 		print(new)
 	archiver = SiteArchiver(None)
-	ret = archiver.fetch(new)
+	ret = archiver.taskProcess(job_test=new)
 
 	if debug:
 		print(archiver)
@@ -68,23 +70,6 @@ def test(url, debug=True):
 			print_rss_response(archiver, new, ret)
 
 
-	# cmd = text("""
-	# 		INSERT INTO
-	# 			web_pages
-	# 			(url, starturl, netloc, distance, is_text, priority, type, fetchtime)
-	# 		VALUES
-	# 			(:url, :starturl, :netloc, :distance, :is_text, :priority, :type, :fetchtime)
-	# 		ON CONFLICT DO NOTHING
-	# 		""")
-	# print("doing")
-	# ins = archiver.db.get_session().execute(cmd, params=new)
-	# print("Done. Ret:")
-	# print(ins)
-	# print(archiver.resetDlstate())
-	# print(archiver.getTask())
-	# print(archiver.getTask())
-	# print(archiver.getTask())
-	# print(archiver.taskProcess())
 	pass
 
 def test_all_rss():
@@ -102,6 +87,93 @@ def test_all_rss():
 		except urllib.error.URLError:
 			print("failure downloading page!")
 
+def db_fiddle():
+	print("Fixing DB things.")
+	print("Getting IDs")
+	have = db.get_session().execute("""
+		SELECT id FROM web_pages WHERE url LIKE 'https://www.wattpad.com/story%' AND state != 'new';
+		""")
+	print("Query executed. Fetching results")
+	have = list(have)
+	print(len(have))
+	count = 0
+
+	chunk = []
+	for item, in have:
+		chunk.append(item)
+
+		count += 1
+		if count % 1000 == 0:
+
+
+			statement = db.get_session().query(db.WebPages) \
+				.filter(db.WebPages.state != 'new')        \
+				.filter(db.WebPages.id.in_(chunk))
+
+			# statement = db.get_session().update(db.WebPages)
+			statement.update({db.WebPages.state : 'new'}, synchronize_session=False)
+			chunk = []
+			print(count, item)
+			db.get_session().commit()
+
+def longest_rows():
+	print("Getting longest rows from database")
+	have = db.get_session().execute("""
+		SELECT
+			id, url, length(content), content
+		FROM
+			web_pages
+		ORDER BY
+			LENGTH(content) DESC NULLS LAST
+		LIMIT 50;
+		""")
+	print("Rows:")
+
+	import os
+	import os.path
+
+	savepath = "./large_files/"
+	for row in have:
+		print(row[0], row[1])
+		try:
+			os.makedirs(savepath)
+		except FileExistsError:
+			pass
+		with open(os.path.join(savepath, "file %s.txt" % row[0]), "wb") as fp:
+			urlst = "URL: %s\n\n" % row[1]
+			size = "Length: %s\n\n" % row[2]
+			fp.write(urlst.encode("utf-8"))
+			fp.write(size.encode("utf-8"))
+			fp.write("{}".format(row[3]).encode("utf-8"))
+
+
+def fix_null():
+	step = 50000
+	end = 475978307
+
+	start = db.get_session().execute("""SELECT MIN(id) FROM web_pages WHERE ignoreuntiltime IS NULL;""")
+	start = list(start)[0][0]
+	start = start - (start % step)
+
+	changed = 0
+
+	for x in range(start, end, step):
+		# SQL String munging! I'm a bad person!
+		# Only done because I can't easily find how to make sqlalchemy
+		# bind parameters ignore the postgres specific cast
+		# The id range forces the query planner to use a much smarter approach which is much more performant for small numbers of updates
+		have = db.get_session().execute("""UPDATE web_pages SET ignoreuntiltime = 'epoch'::timestamp WHERE ignoreuntiltime IS NULL AND id < %s AND id >= %s;""" % (x, x-step))
+		# print()
+		print('%10i, %7.4f, %6i' % (x, x/end * 100, have.rowcount))
+		changed += have.rowcount
+		if changed > 10000:
+			print("Committing (%s changed rows)...." % changed, end=' ')
+			db.get_session().commit()
+			print("done")
+			changed = 0
+	db.get_session().commit()
+
+
 
 def decode(*args):
 	print("Args:", args)
@@ -110,6 +182,14 @@ def decode(*args):
 		op = args[0]
 		if op == "rss":
 			test_all_rss()
+		elif op == "db-fiddle":
+			db_fiddle()
+		elif op == "longest-rows":
+			longest_rows()
+		elif op == "fix-null":
+			fix_null()
+		else:
+			print("ERROR: Unknown command!")
 
 	if len(args) == 2:
 		op  = args[0]
@@ -118,12 +198,25 @@ def decode(*args):
 		if op == "fetch":
 			print("Fetch command! Retreiving content from URL: '%s'" % tgt)
 			test(tgt)
+		elif op == "fetch-silent":
+			print("Fetch command! Retreiving content from URL: '%s'" % tgt)
+			test(tgt, debug=False)
+
+		else:
+			print("ERROR: Unknown command!")
+
 
 if __name__ == "__main__":
 	import sys
 	if len(sys.argv) < 2:
 
 		print("you must pass a operation to execute!")
+		print("Current actions:")
+		print('	rss')
+		print('	db-fiddle')
+		print('	longest-rows')
+		print('	fetch {url}')
+		print('	fetch-silent {url}')
 		sys.exit(1)
 
 	decode(*sys.argv[1:])

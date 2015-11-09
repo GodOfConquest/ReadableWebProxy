@@ -1,16 +1,17 @@
 <!-- extend base layout -->
+{% set title = "Loading" %}
 {% extends "__base.html" %}
 
 {% block content %}
 	{% include '_block_flash.html' %}
-	<div class="well">
+	<div class="well breakword">
 
 		<div>
 			<p>
 				<a href='/render?{{ {"url" : req_url} | urlencode }}'>Raw Render</a> |
 				<a href='{{req_url}}'>Original content</a> |
-				Ignore-cache: {{"no" if not ignore_cache else "yes"}}
-				(<a href='/view?{{ {"url" : req_url, "nocache" : "true"} | urlencode }}'>yes</a>, <a href='/view?{{ {"url" : req_url} | urlencode | safe }}'>no</a>)
+				<a href="javascript:void(0)" id="refetch_link">Re-Fetch</a>
+				| Age: <span class='cachestate'>loading...</span>
 			</p>
 
 		</div>
@@ -32,8 +33,8 @@
 			<p>
 				<a href='/render?{{ {"url" : req_url} | urlencode }}'>Raw Render</a> |
 				<a href='{{req_url}}'>Original content</a> |
-				Ignore-cache: {{"no" if not ignore_cache else "yes"}}
-				(<a href='/view?{{ {"url" : req_url, "nocache" : "true"} | urlencode }}'>yes</a>, <a href='/view?{{ {"url" : req_url} | urlencode | safe }}'>no</a>)
+				<a href="javascript:void(0)" id="refetch_link">Re-Fetch</a>
+				| Age: <span class='cachestate'>loading...</span>
 			</p>
 
 		</div>
@@ -47,23 +48,82 @@
 		{% include '_block_admin_scripts.html' %}
 	{% endif %}
 	<script>
-		{% if ignore_cache %}
-			$("#content").load("/render?{{ {"url" : req_url, "nocache" : "true"} | urlencode | safe }}")
-		{% else %}
-			$("#content").load("/render?{{ {"url" : req_url} | urlencode | safe }}")
-		{% endif %}
+
+		function content_load_cb(data, textStatus, jqXHR)
+		{
+			var content = $("#content");
+			var cachest = $(".cachestate");
+			console.log(content);
+			console.log(data);
+			console.log(textStatus);
+
+			cachest.text(data['cachestate']);
+			content.html(data['contents']);
+			document.title = "ReadProxy - " + data['title']
+		};
+		function content_load_fail(jqXHR, textStatus, errorThrown)
+		{
+			alert("Failed to fetch content!\nError: " + errorThrown + "\nStatus text: " + textStatus);
+		}
+
+
+		function load_cache()
+		{
+
+			var url = "/render?{{ {"url" : req_url} | urlencode | safe }}";
+
+			$.ajax({
+				url      : url,
+				success  : content_load_cb,
+				error    : content_load_cb,
+				dataType : "json",
+				cache    : false,
+
+			})
+
+		}
+		function load_nocache()
+		{
+			var url = "/render?{{ {"url" : req_url, "nocache" : "true"} | urlencode | safe }}";
+
+			var content = $("#content");
+			content.html('<div class="center-block text-center"><h4>Re-Loading</h4><p>Please Wait.</p><img src="/static/loading.gif"><br><br></div>');
+
+			$.ajax({
+				url      : url,
+				success  : content_load_cb,
+				error    : content_load_cb,
+				dataType : "json",
+
+			})
+		}
+
+		load_cache();
+
+		$('#refetch_link').click(load_nocache);
 
 
 	</script>
 	<style>
 		div.easyreading
 		{
-			margin:0 auto;
-			width: 500px;
-			font-family: Arial;
-			font-size: large;
-			word-wrap: break-word;
+			/* Force override any css that slipped through
+			the preprocessor system */
+			margin      : 0 auto !important;
+			max-width   : 500px !important;
+			font-family : Arial !important;
+			font-size   : large !important;
+			word-wrap   : break-word !important;
 		}
+		div.easyreading table, td, tr
+		{
+			/* Force override any css that slipped through
+			the preprocessor system */
+			max-width    : 500px !important;
+			table-layout : fixed !important;
+			word-wrap   : break-word !important;
+		}
+
 	</style>
 {% endblock %}
 

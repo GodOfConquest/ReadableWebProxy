@@ -17,6 +17,9 @@ import datetime
 import calendar
 from WebMirror.util.webFunctions import WebGetRobust
 
+from settings import WATTPAD_REQUIRED_TAGS
+from settings import WATTPAD_MASKED_TAGS
+
 MIN_RATING = 5
 
 ########################################################################################################################
@@ -33,9 +36,11 @@ MIN_RATING = 5
 
 BLOCK_IDS = {
 
-
-
 }
+
+
+
+IS_BETA = False
 
 
 class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
@@ -78,7 +83,7 @@ class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
 ##################################################################################################################################
 
 
-	def extractSeriesReleases(self, seriesPageUrl, metadata):
+	def extractSeriesReleases(self, seriesPageUrl, metadata, soup):
 
 		title  = metadata['title']
 		author = metadata['user']['name']
@@ -111,23 +116,28 @@ class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
 		if metadata['id'] in BLOCK_IDS:
 			return []
 
-		# I know I'm trying to be inclusive and all, but
-		# "spirituality" is bullshit
-		# Sidenote: Is wattpad popular in the middle east? LOTS
-		# of muslim-focused content. Huh.
-		if 'spiritual' in [item.lower().strip() for item in tags]:
-			return []
-		if 'faith' in [item.lower().strip() for item in tags]:
-			return []
+		# for some particularly stupid reasons, the item category tag is
+		# not included in the metadata.
+		# therefore, we parse it out from the page manually.
+		tagdiv = soup.find("div", class_="tags")
+		if tagdiv:
+			for tag in tagdiv.find_all("a", class_='tag'):
+				tags.append(tag.get_text())
 
-		# Only filtered because of quality issues.
-		if 'fanfiction' in [item.lower().strip() for item in tags]:
-			return []
 
-		# Only filtered because of quality issues.
-		if 'fanfic' in [item.lower().strip() for item in tags]:
-			return []
+		tags = list(set([item.lower().strip().replace("  ", " ").replace(" ", "-") for item in tags]))
 
+		# Mask any content with any of the blocked tags.
+		if any([item in tags for item in WATTPAD_MASKED_TAGS]):
+			self.log.warning("Item has a masked tag. Not emitting any releases.")
+			self.log.warning("Tags: '%s'", tags)
+			return
+
+		# And check that at least one of the target tags is present.
+		if not any([item in tags for item in WATTPAD_REQUIRED_TAGS]):
+			self.log.warning("Item missing required tag. Not emitting any releases.")
+			self.log.warning("Tags: '%s'", tags)
+			return
 
 
 		seriesmeta = {}
@@ -152,21 +162,21 @@ class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
 			raw_item['srcname']   = "WattPad"
 			raw_item['published'] = reldate
 			raw_item['linkUrl']   = release['url']
-			msg = msgpackers.buildReleaseMessage(raw_item, title, None, index, None, author=author, postfix=chp_title, tl_type='oel', extraData=extra)
+			msg = msgpackers.buildReleaseMessage(raw_item, title, None, index, None, author=author, postfix=chp_title, tl_type='oel', extraData=extra, beta=IS_BETA)
 			retval.append(msg)
 
 			# Check if there was substantive structure in the chapter
 			# name. Used as a crude heuristic for chapter validity.
-			vol, chp, frag, post = extractTitle(chp_title)
-			if any((vol, chp, frag)):
-				# print("Valid: ", (vol, chp, frag))
-				valid += 1
+			# vol, chp, frag, post = extractTitle(chp_title)
+			# if any((vol, chp, frag)):
+			# 	# print("Valid: ", (vol, chp, frag))
+			# 	valid += 1
 
 			index += 1
 
-		if valid < (index/2):
-			print("Half the present chapters are have no numeric content?")
-			return []
+		# if valid < (index/2):
+		# 	print("Half the present chapters are have no numeric content?")
+		# 	return []
 
 		# Don't send the series metadata if we didn't find any chapters.
 		if not retval:
@@ -183,7 +193,8 @@ class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
 		seriesmeta['sourcesite']  = 'WattPad'
 
 
-		pkt = msgpackers.sendSeriesInfoPacket(seriesmeta)
+		pkt = msgpackers.sendSeriesInfoPacket(seriesmeta, beta=IS_BETA)
+		self.log.info("Wattpad scraper generated %s amqp messages!", len(retval) + 1)
 		self.amqp_put_item(pkt)
 		return retval
 
@@ -193,7 +204,7 @@ class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
 	def sendReleases(self, releases):
 		self.log.info("Total releases found on page: %s", len(releases))
 		for release in releases:
-			pkt = msgpackers.createReleasePacket(release)
+			pkt = msgpackers.createReleasePacket(release, beta=IS_BETA)
 			self.amqp_put_item(pkt)
 
 	def getJsonMetadata(self, soup):
@@ -228,7 +239,7 @@ class WattPadSeriesPageFilter(WebMirror.OutputFilters.FilterBase.FilterBase):
 		print(url)
 		metadata = self.wg.getJson(surl, addlHeaders={'Referer': url})
 
-		releases = self.extractSeriesReleases(self.pageUrl, metadata)
+		releases = self.extractSeriesReleases(self.pageUrl, metadata, soup)
 
 
 		if releases:

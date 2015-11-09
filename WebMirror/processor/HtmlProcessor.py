@@ -3,6 +3,7 @@ import bs4
 import copy
 import re
 import webcolors
+import urllib.parse
 
 import WebMirror.util.urlFuncs as urlFuncs
 from . import ProcessorBase
@@ -183,6 +184,10 @@ class HtmlPageProcessor(ProcessorBase.PageProcessor):
 		for instance in soup.find_all('style', attrs={"type" : "text/css"}):
 			instance.decompose()
 
+		# Even if not explicitly tagged as css
+		for instance in soup.find_all('style'):
+			instance.decompose()
+
 		# And all remote scripts
 		for item in soup.find_all("script"):
 			item.decompose()
@@ -211,6 +216,7 @@ class HtmlPageProcessor(ProcessorBase.PageProcessor):
 
 		hascss = soup.find_all(True, attrs={"style" : True})
 
+
 		# parser = tinycss.make_parser('page3')
 
 		hexr = re.compile('(#(?:[a-fA-F0-9]{6})|#(?:[a-fA-F0-9]{3}))')
@@ -218,8 +224,21 @@ class HtmlPageProcessor(ProcessorBase.PageProcessor):
 		for item in hascss:
 			if item['style']:
 				ststr = item['style']
+
+				# Prevent inline fonts.
 				if 'font' in ststr.lower():
 					item['style'] = ''
+
+				# Disable all explicit width settings.
+				if 'width' in ststr.lower():
+					item['style'] = ''
+				if 'max-width' in ststr.lower():
+					item['style'] = ''
+
+				if 'background-image:' in ststr.lower():
+					item['style'] = ''
+
+
 
 				old = hexr.findall(ststr)
 				for match in old:
@@ -309,6 +328,29 @@ class HtmlPageProcessor(ProcessorBase.PageProcessor):
 
 		return soup
 
+
+	# Miscellaneous spot-fixes for specific sites.
+	def spotPatch(self, soup):
+
+		# Replace <pre> tags on wattpad.
+		wp_div = soup.find_all('div', class_="panel-reading")
+		for item in wp_div:
+			for pre in item.find_all("pre"):
+				pre.name = "div"
+		return soup
+
+
+
+
+	def preprocessBody(self, soup):
+		for link in soup.find_all("a"):
+			if link.has_attr("href"):
+				if "javascript:if(confirm(" in link['href']:
+					qs = urllib.parse.urlsplit(link['href']).query
+					link['href'] = "/viewstory.php?{}".format(qs)
+
+		return soup
+
 	# Process a plain HTML page.
 	# This call does a set of operations to permute and clean a HTML page.
 	#
@@ -339,6 +381,7 @@ class HtmlPageProcessor(ProcessorBase.PageProcessor):
 		soup = self.decomposeItems(soup, self._decompose)
 
 		soup = self.decomposeAdditional(soup)
+		soup = self.spotPatch(soup)
 		soup = self.destyleItems(soup)
 
 		# Allow child-class hooking

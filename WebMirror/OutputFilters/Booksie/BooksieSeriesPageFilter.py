@@ -16,7 +16,8 @@ import datetime
 import time
 import json
 
-MIN_RATING = 5
+from settings import BOOKSIE_REQUIRED_TAGS
+from settings import BOOKSIE_MASKED_TAGS
 
 ########################################################################################################################
 #
@@ -31,9 +32,27 @@ MIN_RATING = 5
 ########################################################################################################################
 
 
+# I've done  a lot of scraping of sites with tagging facilities at this point, and I think
+# I can say with some certainly people just don't understand what
+# tags are a lot of the time.
+# Seriously, do people just write random crap in the tag field?
+BAD_TAGS = [
+	'story',
+	'written',
+	'by',
+	'2',
+	'friends.',
+
+	# Apparently, multi-word tags are beyond booksie.
+	'science',
+	'fiction',
+]
 
 
-class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
+IS_BETA = True
+
+
+class BooksieSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 
 
 	wanted_mimetypes = [
@@ -42,13 +61,13 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 						]
 	want_priority    = 50
 
-	loggerPath = "Main.Filter.RoyalRoad.Page"
+	loggerPath = "Main.Filter.Booksie.Page"
 
 
 	@staticmethod
 	def wantsUrl(url):
-		if re.search(r"^http://(?:www\.)?royalroadl\.com/fiction/\d+/?$", url):
-			print("RRLSeriesPageProcessor Wants url: '%s'" % url)
+		if re.search(r"^http://(?:www\.)?booksie\.com/.*?/novel/.*?$", url):
+			print("BooksieSeriesPageProcessor Wants url: '%s'" % url)
 			return True
 		return False
 
@@ -56,13 +75,12 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 
 		self.kwargs     = kwargs
 
-
 		self.pageUrl    = kwargs['pageUrl']
 
 		self.content    = kwargs['pgContent']
 		self.type       = kwargs['type']
 
-		self.log.info("Processing RoyalRoadL Item")
+		self.log.info("Processing Booksie Item")
 		super().__init__(**kwargs)
 
 
@@ -73,88 +91,105 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 
 	def extractSeriesReleases(self, seriesPageUrl, soup):
 
-		titletg  = soup.find("h1", class_='fiction-title')
-		authortg = soup.find("span", class_='author')
-		ratingtg = soup.find("span", class_='overall')
+		# Yeah, the title text is in a div with an id of "titlePic".
+		# The actual image is in a div with the /class/ titlePic
+		# wat.
+		titlecontainer = soup.find("div", id='titlePic')
+		titletg  = titlecontainer.h1
+		typetg, authortg, categorytg = titlecontainer.find_all("a")
 
-		if not ratingtg:
-			return []
-
-		if not float(ratingtg['score']) >= MIN_RATING:
+		if "novel" not in typetg.get_text().lower():
 			return []
 
 		if not titletg:
 			return []
 		if not authortg:
 			return []
-		if not ratingtg:
-			return []
 
 		title  = titletg.get_text()
 		author = authortg.get_text()
-		assert author.startswith("by ")
-		author = author[2:].strip()
+		genre  = categorytg.get_text()
+
+		descDiv = soup.find('p', class_='summary')
+		for item in descDiv.find_all("a"):
+			item.decompose()
+		desc = [item.strip() for item in descDiv.find_all(text=True) if item.strip()]
 
 
-		descDiv = soup.find('div', class_='description')
-		paras = descDiv.find_all("p")
+		tagdiv = soup.find("div", id='cloudMain')
+
 		tags = []
+		# Skip if no tags
+		if tagdiv:
+			tags = [item.get_text().strip().lower() for item in tagdiv.find_all("a")]
 
-		desc = []
-		for para, text in [(para, para.get_text()) for para in paras]:
-			if text.lower().startswith('categories:'):
-				tagstr = text.split(":", 1)[-1]
-				items = tagstr.split(",")
-				[tags.append(item.strip()) for item in items if item.strip()]
-			else:
-				desc.append(para)
+		tags.append(genre.lower())
+		# Fix a lot of the stupid tag fuckups I've seen.
+		# People are stupid.
+		tags = [tag for tag in tags if tag not in BAD_TAGS]
+		tags = [tag for tag in tags if len(tag) > 2]
+		tags = [tag.replace("  ", " ").replace(" ", "-") for tag in tags]
+		tags = list(set(tags))
 
+
+		if not any([tag in BOOKSIE_REQUIRED_TAGS for tag in tags]):
+			self.log.info("Missing required tags!")
+			return []
+		if any([tag in BOOKSIE_MASKED_TAGS for tag in tags]):
+			self.log.info("Masked tag!")
+			return []
+
+		# Wrap the paragraphs in p tags.
+		desc = ['<p>{text}</p>'.format(text=para) for para in desc]
 
 		seriesmeta = {}
-
 		seriesmeta['title']       = title
 		seriesmeta['author']      = author
 		seriesmeta['tags']        = tags
 		seriesmeta['homepage']    = seriesPageUrl
-		seriesmeta['desc']        = " ".join([str(para) for para in desc])
+		seriesmeta['desc']        = "\n\n ".join([str(para) for para in desc])
 		seriesmeta['tl_type']     = 'oel'
-		seriesmeta['sourcesite']  = 'RoyalRoadL'
+		seriesmeta['sourcesite']  = 'Booksie'
 
-		pkt = msgpackers.sendSeriesInfoPacket(seriesmeta)
+		pkt = msgpackers.sendSeriesInfoPacket(seriesmeta, beta=IS_BETA)
 
 		extra = {}
 		extra['tags']     = tags
 		extra['homepage'] = seriesPageUrl
-		extra['sourcesite']  = 'RoyalRoadL'
+		extra['sourcesite']  = 'Booksie'
 
+		# Decompose the announcement (?) div that's cluttering up the
+		# search for the chapterdiv
+		badchp = soup.find("div", class_='chapters', id='noticeMessage')
+		badchp.decompose()
 
 		chapters = soup.find("div", class_='chapters')
-		releases = chapters.find_all('li', class_='chapter')
+		releases = chapters.find_all('a')
+
 
 		retval = []
 		for release in releases:
-			chp_title, reldatestr = release.find_all("span")
-			rel = datetime.datetime.strptime(reldatestr.get_text(), '%d/%m/%y')
-			if rel.date() == datetime.date.today():
-				reldate = time.time()
-			else:
-				reldate = calendar.timegm(rel.timetuple())
 
-			chp_title = chp_title.get_text()
-			# print("Chp title: '{}'".format(chp_title))
-			vol, chp, frag, post = extractTitle(chp_title)
+			# No post time, unfortunately
+			chp = int(release.get_text())
+			reldate = time.time()
+
+			# Force releases to the beginning of time untill we catch up.
+			reldate = 0
+
+			vol  = None
+			frag = None
 
 			raw_item = {}
-			raw_item['srcname']   = "RoyalRoadL"
+			raw_item['srcname']   = "Booksie"
 			raw_item['published'] = reldate
-			raw_item['linkUrl']   = release.a['href']
+			raw_item['linkUrl']   = release['href']
 
-			msg = msgpackers.buildReleaseMessage(raw_item, title, vol, chp, frag, author=author, postfix=chp_title, tl_type='oel', extraData=extra)
+			msg = msgpackers.buildReleaseMessage(raw_item, title, vol, chp, frag, author=author, tl_type='oel', extraData=extra, beta=IS_BETA)
 			retval.append(msg)
 
-		# Do not add series without 3 chapters.
-		if len(retval) < 3:
-			return []
+
+
 
 		if not retval:
 			return []
@@ -167,7 +202,7 @@ class RRLSeriesPageProcessor(WebMirror.OutputFilters.FilterBase.FilterBase):
 	def sendReleases(self, releases):
 		self.log.info("Total releases found on page: %s. Emitting messages into AMQP local queue.", len(releases))
 		for release in releases:
-			pkt = msgpackers.createReleasePacket(release)
+			pkt = msgpackers.createReleasePacket(release, beta=IS_BETA)
 			self.amqp_put_item(pkt)
 
 

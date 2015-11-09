@@ -5,6 +5,7 @@ if __name__ == "__main__":
 	logSetup.initLogging()
 
 import WebMirror.rules
+import WebMirror.SpecialCase
 import WebMirror.LogBase as LogBase
 import runStatus
 import time
@@ -33,6 +34,8 @@ from WebMirror.Fetch import DownloadException
 import WebMirror.Fetch
 import WebMirror.database as db
 from config import C_RESOURCE_DIR
+
+from activePlugins import INIT_CALLS
 
 if "debug" in sys.argv:
 	CACHE_DURATION = 1
@@ -80,6 +83,12 @@ GLOBAL_BAD = [
 			'b.scorecardresearch.com',
 			'//mail.google.com',
 			'javascript:void',
+			'tumblr.com/widgets/',
+			'www.tumblr.com/login',
+			'twitter.com/intent/',
+			'www.pinterest.com/pin/',
+			'www.wattpad.com/login?',
+			'://tumblr.com',
 	]
 
 
@@ -154,10 +163,7 @@ def saveCoverFile(filecont, fHash, filename):
 
 class SiteArchiver(LogBase.LoggerMixin):
 
-
 	loggerPath = "Main.SiteArchiver"
-
-
 
 	# Fetch items up to 1,000,000 (1 million) links away from the root source
 	# This (functionally) equates to no limit.
@@ -178,6 +184,12 @@ class SiteArchiver(LogBase.LoggerMixin):
 		self.ruleset = ruleset
 		self.fetcher = WebMirror.Fetch.ItemFetcher
 		self.wg = webFunctions.WebGetRobust(cookie_lock=cookie_lock)
+
+		self.specialty_handlers = WebMirror.rules.load_special_case_sites()
+
+		for item in INIT_CALLS:
+			item(self)
+
 		# print("SiteArchiver rules loaded")
 		self.relinkable = set()
 		for item in ruleset:
@@ -235,7 +247,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 			# No title is present in a file response
 			self.upsertFileResponse(job, response)
 		elif 'rss-content' in response:
-			self.upsertRssItems(response['rss-content'], job.url)
+			self.upsertRssItems(job, response['rss-content'], job.url)
 			self.upsertResponseLinks(job, plain=[entry['linkUrl'] for entry in response['rss-content']])
 
 		else:
@@ -244,6 +256,9 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 		# Reset the fetch time download
 
+
+	def special_case_handle(self, job):
+		WebMirror.SpecialCase.handleSpecialCase(job, self, self.specialty_handlers)
 
 	# Update the row with the item contents
 	def upsertReponseContent(self, job, response):
@@ -259,8 +274,9 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 				job.state    = 'complete'
 
-				if 'rawcontent' in response:
-					job.raw_content = response['rawcontent']
+				# Disabled for space-reasons.
+				# if 'rawcontent' in response:
+				# 	job.raw_content = response['rawcontent']
 
 				job.fetchtime = datetime.datetime.now()
 
@@ -316,7 +332,26 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 
 
-	def upsertRssItems(self, entrylist, feedurl):
+	def upsertRssItems(self, job, entrylist, feedurl):
+
+		while 1:
+			try:
+				job.state     = 'complete'
+				job.fetchtime = datetime.datetime.now()
+				break
+
+			except sqlalchemy.exc.InvalidRequestError:
+				print("InvalidRequest error!")
+				self.db.get_session().rollback()
+				traceback.print_exc()
+			except sqlalchemy.exc.OperationalError:
+				print("InvalidRequest error!")
+				self.db.get_session().rollback()
+			except sqlalchemy.exc.IntegrityError:
+				print("[upsertRssItems] -> Integrity error!")
+				traceback.print_exc()
+				self.db.get_session().rollback()
+
 		# print("InsertFeed!")
 		for feedentry in entrylist:
 			# print(feedentry)
@@ -342,30 +377,32 @@ class SiteArchiver(LogBase.LoggerMixin):
 					traceback.print_exc()
 					self.db.get_session().rollback()
 
+	def generalLinkClean(self, link, badwords):
+		if link.startswith("data:"):
+			return None
+		if any([item in link for item in badwords]):
+			# print("Filtered:", link)
+			return None
+		return link
 
 	# Todo: FIXME
 	def filterContentLinks(self, job, links, badwords):
 		ret = set()
 		for link in links:
-			if link.startswith("data:"):
-				continue
-			if any([item in link for item in badwords]):
-				# print("Filtered:", link)
+			link = self.generalLinkClean(link, badwords)
+			if not link:
 				continue
 			netloc = urllib.parse.urlsplit(link).netloc
 			if netloc in self.ctnt_filters and job.netloc in self.ctnt_filters[netloc]:
 				# print("Valid content link: ", link)
 				ret.add(link)
-
 		return ret
 
 	def filterResourceLinks(self, job, links, badwords):
 		ret = set()
 		for link in links:
-			if link.startswith("data:"):
-				continue
-			if any([item in link for item in badwords]):
-				# print("Filtered:", link)
+			link = self.generalLinkClean(link, badwords)
+			if not link:
 				continue
 			netloc = urllib.parse.urlsplit(link).netloc
 			if netloc in self.rsc_filters:
@@ -543,7 +580,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 
 
 
-	def getTask(self):
+	def getTask(self, wattpad=False):
 		'''
 		Get a job row item from the database.
 
@@ -555,10 +592,28 @@ class SiteArchiver(LogBase.LoggerMixin):
 		# or we succeed.
 		while 1:
 			try:
+				if wattpad:
+					filt = """
+					AND
+						(
+							web_pages.netloc = 'a.wattpad.com'
+						OR
+							web_pages.netloc = 'www.wattpad.com'
+						)
+					"""
+				else:
+					filt = """
+					AND NOT
+						(
+							web_pages.netloc = 'a.wattpad.com'
+						OR
+							web_pages.netloc = 'www.wattpad.com'
+						)
+					"""
 				# Hand-tuned query, I couldn't figure out how to
 				# get sqlalchemy to emit /exactly/ what I wanted.
 				# TINY changes will break the query optimizer, and
-				# the 100 ms query will suddenly take 10 seconds!
+				# the 10 ms query will suddenly take 10 seconds!
 				raw_query = text('''
 						SELECT
 						    web_pages.id
@@ -580,11 +635,25 @@ class SiteArchiver(LogBase.LoggerMixin):
 						            distance < 1000000
 						        AND
 						            normal_fetch_mode = true
+						        AND
+						            (
+						                web_pages.ignoreuntiltime < current_timestamp + '5 minutes'::interval
+						            OR
+						                web_pages.ignoreuntiltime IS NULL
+						            )
+						        %s
 						    )
 						AND
 						    web_pages.distance < 1000000
+						AND
+						    (
+						        web_pages.ignoreuntiltime < current_timestamp + '5 minutes'::interval
+						    OR
+						        web_pages.ignoreuntiltime IS NULL
+						    )
+						%s
 						LIMIT 1;
-					''')
+					''' % (filt, filt))
 
 
 				start = time.time()
@@ -630,49 +699,61 @@ class SiteArchiver(LogBase.LoggerMixin):
 				self.db.get_session().rollback()
 
 
+	def do_job(self, job):
+		try:
+			self.dispatchRequest(job)
+		except urllib.error.URLError:
+			content = "DOWNLOAD FAILED - urllib URLError"
+			content += "<br>"
+			content += traceback.format_exc()
+			job.content = content
+			# job.raw_content = content
+			job.state = 'error'
+			job.errno = -1
+			self.db.get_session().commit()
+			self.log.error("`urllib.error.URLError` Exception when downloading.")
+		except ValueError:
+			content = "DOWNLOAD FAILED - ValueError"
+			content += "<br>"
+			content += traceback.format_exc()
+			job.content = content
+			# job.raw_content = content
+			job.state = 'error'
+			job.errno = -3
+			self.db.get_session().commit()
+		except DownloadException:
+			content = "DOWNLOAD FAILED - DownloadException"
+			content += "<br>"
+			content += traceback.format_exc()
+			job.content = content
+			# job.raw_content = content
+			job.state = 'error'
+			job.errno = -2
+			self.db.get_session().commit()
+			self.log.error("`DownloadException` Exception when downloading.")
+		except KeyboardInterrupt:
+			runStatus.run = False
+			runStatus.run_state.value = 0
+			print("Keyboard Interrupt!")
 
-	def taskProcess(self):
+	def taskProcess(self, job_test=None):
 
-		job = self.getTask()
-		if job:
-			try:
-				self.dispatchRequest(job)
-			except urllib.error.URLError:
-				content = "DOWNLOAD FAILED - urllib URLError"
-				content += "<br>"
-				content += traceback.format_exc()
-				job.content = content
-				job.raw_content = content
-				job.state = 'error'
-				job.errno = -1
-				self.db.get_session().commit()
-				self.log.error("`urllib.error.URLError` Exception when downloading.")
-			except ValueError:
-				content = "DOWNLOAD FAILED - ValueError"
-				content += "<br>"
-				content += traceback.format_exc()
-				job.content = content
-				job.raw_content = content
-				job.state = 'error'
-				job.errno = -3
-				self.db.get_session().commit()
-			except DownloadException:
-				content = "DOWNLOAD FAILED - DownloadException"
-				content += "<br>"
-				content += traceback.format_exc()
-				job.content = content
-				job.raw_content = content
-				job.state = 'error'
-				job.errno = -2
-				self.db.get_session().commit()
-				self.log.error("`DownloadException` Exception when downloading.")
-			except KeyboardInterrupt:
-				runStatus.run = False
-				runStatus.run_state.value = 0
-				print("Keyboard Interrupt!")
-
+		if job_test:
+			job = job_test
 		else:
-			time.sleep(5)
+			job = self.getTask()
+		if not job:
+			job = self.getTask(wattpad=True)
+			if not job:
+				time.sleep(5)
+				return
+
+		if job.netloc in self.specialty_handlers:
+			self.special_case_handle(job)
+		else:
+			if job:
+				self.do_job(job)
+
 
 
 	def synchronousJobRequest(self, url, ignore_cache=False):
@@ -761,6 +842,7 @@ class SiteArchiver(LogBase.LoggerMixin):
 		else:
 			if row.state == "complete" and row.fetchtime > thresh_text_ago:
 				self.log.info("Using cached fetch results as content was retreived within the last %s seconds.", RSC_CACHE_DURATION)
+				self.log.info("dbid: %s", row.id)
 				return row
 			elif row.state == "complete" and row.fetchtime > thresh_bin_ago and "text" not in row.mimetype.lower():
 				self.log.info("Using cached fetch results as content was retreived within the last %s seconds.", CACHE_DURATION)

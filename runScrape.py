@@ -177,10 +177,6 @@ def go_sched():
 
 def go_test():
 	import WebMirror.Engine
-	# rules = WebMirror.rules.load_rules()
-	# WebMirror.Runner.initializeStartUrls(rules)
-	# WebMirror.Runner.resetInProgress()
-	# runner = WebMirror.Runner.Crawler()
 
 	engine = WebMirror.Engine.SiteArchiver(None)
 	print(engine)
@@ -190,7 +186,7 @@ def go_test():
 def go():
 
 	rules = WebMirror.rules.load_rules()
-	WebMirror.Runner.initializeStartUrls(rules)
+	# WebMirror.Runner.initializeStartUrls(rules)
 	WebMirror.Runner.resetInProgress()
 	runner = WebMirror.Runner.Crawler()
 	runner.run()
@@ -207,6 +203,7 @@ def profile():
 
 if __name__ == "__main__":
 	import sys
+	print("Auxilliary modes: 'test', 'scheduler'.")
 	if "scheduler" in sys.argv:
 		go_sched()
 	if "test" in sys.argv:
@@ -217,5 +214,4 @@ if __name__ == "__main__":
 		if not started:
 			started = True
 
-			# profile()
 			go()
